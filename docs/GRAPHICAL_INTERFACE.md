@@ -61,11 +61,16 @@ transcription.
 `View > Saved Transcripts` greys out until the worker finishes, and the recording
 shortcuts are inert while the library is showing.
 
-Every row carries its own delete control, the small cross at its right edge.
-Deleting one transcript is offered where that transcript is, so it is always
-obvious which one would go. It asks for confirmation naming the date first, and
-the recording the transcript came from is kept: `File > Delete All Recordings`
-remains the only way to remove audio.
+**Delete Transcript** sits in the bottom right corner, directly beneath the
+transcript it would remove, so the target is never ambiguous. It is enabled only
+while a transcript is on screen, and asks for confirmation naming the date
+first.
+
+Its colour is ember rather than plain red: destructive enough to give pause, but
+not the colour the interface uses for something having gone wrong.
+
+The recording the transcript came from is kept.
+`File > Delete All Recordings` remains the only way to remove audio.
 
 Right-clicking a row additionally offers:
 

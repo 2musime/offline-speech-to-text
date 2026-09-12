@@ -28,7 +28,6 @@
 #include <QTime>
 #include <QTextCursor>
 #include <QListWidget>
-#include <QToolButton>
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -221,6 +220,31 @@ public:
         saved_view_->setAccessibleName("Saved transcript");
         reader_layout->addWidget(saved_view_, 1);
 
+        // Bottom right, under the transcript it would remove, so the target is
+        // never ambiguous. Ember rather than plain red: destructive enough to
+        // give pause, not an error.
+        delete_saved_ = new QPushButton("Delete Transcript", reader);
+        delete_saved_->setEnabled(false);
+        delete_saved_->setMinimumHeight(32);
+        delete_saved_->setCursor(Qt::PointingHandCursor);
+        delete_saved_->setToolTip("Delete the transcript shown above. The recording is kept.");
+        delete_saved_->setStyleSheet(
+            "QPushButton {"
+            "  background-color: #c1440e;"
+            "  color: #ffffff;"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "  padding: 6px 18px;"
+            "}"
+            "QPushButton:hover  { background-color: #a63a0c; }"
+            "QPushButton:pressed { background-color: #8c3009; }"
+            "QPushButton:disabled { background-color: #e0ccc4; color: #9a8d88; }");
+
+        auto* reader_footer = new QHBoxLayout();
+        reader_footer->addStretch();
+        reader_footer->addWidget(delete_saved_);
+        reader_layout->addLayout(reader_footer);
+
         library_body->addWidget(reader, 1);
         library_layout->addLayout(library_body, 1);
 
@@ -256,6 +280,7 @@ public:
         connect(back_button_, &QPushButton::clicked, this, [this] { show_recorder(); });
         connect(saved_copy_, &QPushButton::clicked, this, [this] { copy_saved(); });
         connect(saved_save_, &QPushButton::clicked, this, [this] { save_saved(); });
+        connect(delete_saved_, &QPushButton::clicked, this, [this] { delete_selected_transcript(); });
         connect(history_list_, &QListWidget::currentRowChanged, this,
                 [this](int row) { show_history_entry(row); });
         connect(history_list_, &QListWidget::customContextMenuRequested, this,
@@ -777,50 +802,12 @@ private:
                 ? QString("(no text)")
                 : QString::fromStdString(entry.preview);
             // The row is a label, not the transcript: keep it to one glance.
-            if (preview.size() > 40) {
-                preview = preview.left(40).trimmed() + "...";
+            if (preview.size() > 44) {
+                preview = preview.left(44).trimmed() + "...";
             }
-
-            auto* item = new QListWidgetItem(history_list_);
+            auto* item = new QListWidgetItem(
+                QString("%1\n%2").arg(QString::fromUtf8(when), preview), history_list_);
             item->setToolTip(QString::fromStdString(entry.path.string()));
-
-            auto* row = new QWidget(history_list_);
-            auto* row_layout = new QHBoxLayout(row);
-            row_layout->setContentsMargins(6, 4, 4, 4);
-
-            auto* text = new QVBoxLayout();
-            text->setSpacing(1);
-            auto* when_label = new QLabel(QString::fromUtf8(when), row);
-            auto* preview_label = new QLabel(preview, row);
-            preview_label->setEnabled(false);
-            // Ignored width: the labels must yield rather than push the delete
-            // control out of the row, which is what a natural width would do.
-            when_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            preview_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            text->addWidget(when_label);
-            text->addWidget(preview_label);
-            row_layout->addLayout(text, 1);
-
-            // Deleting one transcript is offered where that transcript is, so
-            // it is always obvious which one would go.
-            auto* remove = new QToolButton(row);
-            remove->setText("\u2715");
-            remove->setAutoRaise(true);
-            remove->setToolTip("Delete this transcript");
-            remove->setAccessibleName(QString("Delete transcript from %1").arg(QString::fromUtf8(when)));
-            row_layout->addWidget(remove);
-
-            // The path is captured by value: the row widget is destroyed and
-            // rebuilt on every refresh, so it must not outlive a reference.
-            const fs::path path = entry.path;
-            const QString label = QString::fromUtf8(when);
-            connect(remove, &QToolButton::clicked, this,
-                    [this, path, label] { delete_one_transcript(path, label); });
-
-            // Zero width lets the view use the viewport's, so the row never
-            // demands more room than the list has.
-            item->setSizeHint(QSize(0, row->sizeHint().height()));
-            history_list_->setItemWidget(item, row);
         }
         if (previous_row >= 0 && previous_row < history_list_->count()) {
             history_list_->setCurrentRow(previous_row);
@@ -833,6 +820,7 @@ private:
             saved_title_->setText("Select a transcript to read it");
             saved_save_->setEnabled(false);
             saved_copy_->setEnabled(false);
+            delete_saved_->setEnabled(false);
             return;
         }
         const TranscriptEntry& entry = entries_[static_cast<std::size_t>(row)];
@@ -857,6 +845,20 @@ private:
             .arg(QString::fromUtf8(when), audio.any() ? "" : "   (audio deleted)"));
         saved_save_->setEnabled(true);
         saved_copy_->setEnabled(true);
+        delete_saved_->setEnabled(true);
+    }
+
+    // Acts on what is on screen, which is what the button sits beneath.
+    void delete_selected_transcript() {
+        const int row = history_list_->currentRow();
+        if (row < 0 || row >= static_cast<int>(entries_.size())) {
+            return;
+        }
+        const TranscriptEntry& entry = entries_[static_cast<std::size_t>(row)];
+        char when[64];
+        std::tm shown = entry.stamp.when;
+        std::strftime(when, sizeof(when), "%d %b %Y, %H:%M", &shown);
+        delete_one_transcript(entry.path, QString::fromUtf8(when));
     }
 
     // Deletes a single transcript. The recording it came from is deliberately
@@ -881,6 +883,7 @@ private:
         saved_title_->setText("Select a transcript to read it");
         saved_save_->setEnabled(false);
         saved_copy_->setEnabled(false);
+        delete_saved_->setEnabled(false);
         refresh_history();
         statusBar()->showMessage("Transcript deleted", 3000);
     }
@@ -1249,6 +1252,7 @@ private:
     QLabel* saved_title_;
     QPushButton* saved_save_;
     QPushButton* saved_copy_;
+    QPushButton* delete_saved_;
     QAction* history_action_;
     std::vector<TranscriptEntry> entries_;
     QLabel* context_label_;
