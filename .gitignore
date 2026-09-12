@@ -58,6 +58,11 @@ compile_commands.json
 *.bak
 *.swp
 
+# Local models and generated recordings
+models/*.bin
+*.wav
+transcription.txt
+
 # vcpkg
 vcpkg_installed/
 
