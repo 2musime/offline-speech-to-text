@@ -39,6 +39,18 @@ Run the CLI worker directly:
 ./build-release/audio_to_text_cli models/ggml-small.en.bin --threads 4
 ```
 
+Recordings are limited to 15 seconds by default. Choose a supported limit with
+`--duration 15`, `--duration 45`, or `--duration 60`:
+
+```bash
+./build-release/audio_to_text_cli models/ggml-small.en.bin \
+  --duration 45 --threads 4
+```
+
+The limit is enforced for both normal and streaming capture. Empty recordings,
+unsupported duration values, buffer overflow, and truncated recordings produce
+clear errors instead of unbounded memory growth.
+
 ## Sanitizer build
 
 Use sanitizers during development. This build is for testing, not production
