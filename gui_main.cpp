@@ -48,12 +48,20 @@ public:
         controls->addWidget(stop_button_);
         layout->addLayout(controls);
 
+        auto* input_controls = new QHBoxLayout();
+        device_selector_ = new QComboBox(central);
+        input_controls->addWidget(new QLabel("Microphone:", central));
+        input_controls->addWidget(device_selector_, 1);
+        layout->addLayout(input_controls);
+
         status_label_ = new QLabel("Ready", central);
         duration_label_ = new QLabel("Duration: 00:00", central);
         model_label_ = new QLabel("Model: not loaded", central);
+        input_label_ = new QLabel("Input: not selected", central);
         layout->addWidget(status_label_);
         layout->addWidget(duration_label_);
         layout->addWidget(model_label_);
+        layout->addWidget(input_label_);
 
         transcript_ = new QPlainTextEdit(central);
         transcript_->setPlaceholderText("Transcription will appear here...");
@@ -77,6 +85,8 @@ public:
         timer_->setInterval(250);
         limit_timer_ = new QTimer(this);
         limit_timer_->setSingleShot(true);
+
+        populate_devices();
 
         connect(start_button_, &QPushButton::clicked, this, [this] { start_recording(); });
         connect(stop_button_, &QPushButton::clicked, this, [this] { stop_recording(); });
@@ -113,12 +123,17 @@ private:
         final_transcription_.clear();
         transcript_path_.clear();
         model_label_->setText("Model: validating...");
+        input_label_->setText("Input: opening...");
         completed_ = false;
         error_shown_ = false;
         const QString model = model_selector_->currentData().toString();
         const QString duration = duration_selector_->currentData().toString();
-        process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
-                {model, "--stream", "--threads", "4", "--duration", duration});
+        QStringList arguments{model, "--stream", "--threads", "4", "--duration", duration};
+        const int device = device_selector_->currentData().toInt();
+        if (device >= 0) {
+            arguments << "--device" << QString::number(device);
+        }
+        process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", arguments);
         if (!process_->waitForStarted(1000)) {
             set_idle("Could not start the audio worker.");
             return;
@@ -128,6 +143,7 @@ private:
         stop_button_->setEnabled(true);
         model_selector_->setEnabled(false);
         duration_selector_->setEnabled(false);
+        device_selector_->setEnabled(false);
         started_at_ = QTime::currentTime();
         timer_->start();
         limit_timer_->start(duration_selector_->currentData().toInt() * 1000);
@@ -173,6 +189,11 @@ private:
             return;
         }
 
+        if (line.startsWith("INPUT|")) {
+            input_label_->setText("Input: " + line.section('|', 1));
+            return;
+        }
+
         if (!pending_text_label_.isEmpty()) {
             if (pending_text_label_ == "partial") {
                 append_partial_text(line);
@@ -193,6 +214,34 @@ private:
         if (line == "Transcription:") {
             pending_text_label_ = "final";
             return;
+        }
+    }
+
+    // Asks the worker to enumerate capture devices before any recording starts.
+    void populate_devices() {
+        device_selector_->addItem("System default", -1);
+
+        QProcess probe;
+        probe.start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", {"--list-devices"});
+        if (!probe.waitForFinished(4000)) {
+            probe.kill();
+            probe.waitForFinished(1000);
+            return;
+        }
+
+        const QStringList lines = QString::fromUtf8(probe.readAllStandardOutput()).split('\n');
+        for (const QString& line : lines) {
+            if (!line.startsWith("DEVICE|")) {
+                continue;
+            }
+            const QStringList parts = line.split('|');
+            if (parts.size() < 4) {
+                continue;
+            }
+            const int index = parts.at(1).toInt();
+            const QString name = parts.mid(3).join('|').trimmed();
+            const bool is_default = parts.at(2) == "default";
+            device_selector_->addItem(is_default ? name + " (default)" : name, index);
         }
     }
 
@@ -371,11 +420,13 @@ private:
         stop_button_->setEnabled(false);
         model_selector_->setEnabled(true);
         duration_selector_->setEnabled(true);
+        device_selector_->setEnabled(true);
         set_status(status);
     }
 
     QComboBox* model_selector_;
     QComboBox* duration_selector_;
+    QComboBox* device_selector_;
     QPushButton* start_button_;
     QPushButton* stop_button_;
     QPushButton* save_button_;
@@ -383,6 +434,7 @@ private:
     QLabel* status_label_;
     QLabel* duration_label_;
     QLabel* model_label_;
+    QLabel* input_label_;
     QPlainTextEdit* transcript_;
     QProcess* process_;
     QTimer* timer_;
