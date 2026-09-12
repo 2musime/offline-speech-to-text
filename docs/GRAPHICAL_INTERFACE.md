@@ -6,36 +6,38 @@ never loads Whisper itself, so the event loop stays free.
 
 ## Screens
 
-Three, one job each:
+Three, one job each, chosen from the bar across the top:
 
 | Screen | Holds | Reached by |
 |---|---|---|
-| **Home** | the application's name, what it does, and one button | where it opens; **← Home** from either other screen |
-| **Recording** | settings, the record panel, the live transcript | **Start a Recording**, or `Ctrl+R` |
-| **Saved transcripts** | the list and a reader | `Transcripts > Saved Transcripts`, or `Ctrl+H` |
+| **Home** | the application's name, what it does, and one button | opens here; `Home`, or `Ctrl+1` |
+| **Recording** | settings, the record panel, the live transcript | `Recording`, `Ctrl+2`, or **Start a Recording** |
+| **Transcripts** | the saved list and a reader | `Transcripts`, or `Ctrl+H` |
+
+The bar is navigation and nothing else. Pressing **Recording** goes to the
+recording screen; it does not start a recording. Starting is done there, with
+the model, microphone and limit already in view.
 
 Home is deliberately almost empty. It says what the application is and offers
-the one thing someone opening it wants. **Recording does not happen here**: the
-button moves to the recording screen, where the model, microphone and limit are
-chosen first.
+the one thing someone opening it wants.
 
-Leaving the recording screen is closed off while a recording or transcription is
-running, for the same reason the library is: the controls for the thing still
-running must not be hidden behind another screen.
+Navigation closes while a recording or transcription is running. The controls
+for something still running must not be hidden behind another screen.
 
-## Menus
+## Where the actions live
 
-| Menu | Holds |
+Each screen owns what belongs to it, so nothing is hidden in a menu away from
+the thing it affects:
+
+| Action | Where |
 |---|---|
-| **Home** | Quit, and nothing else |
-| **Recording** | Start or stop, Cancel |
-| **Transcripts** | Saved Transcripts, Delete All Recordings |
-| **Help** | Privacy, About |
+| Start, stop, cancel | the recording screen |
+| Save, copy the live transcript | beside that transcript |
+| Save, copy, delete one saved transcript | beside the transcript being read |
+| Delete all recordings | the transcripts screen, which is what it empties |
+| Privacy, About, Quit | `Help` |
 
-Saving and copying are not in a menu: they act on the transcript in front of
-you, so they sit beside it, keeping their `Ctrl+S` and `Ctrl+Shift+C`
-shortcuts. Deleting every recording is about stored data rather than the
-application, so it sits with the transcripts.
+`Help` is the only entry in the bar that opens a menu; the rest switch screens.
 
 ## Layout
 
@@ -76,7 +78,7 @@ window suggests stalled work.
 
 ## Saved transcripts
 
-`Transcripts > Saved Transcripts`, or `Ctrl+H`, replaces the window with the library: a
+`Transcripts` in the top bar, or `Ctrl+H`, shows the library: a
 list of every transcript the application has written, newest first, each row
 showing when it was recorded and the opening words. **Back to Recording** returns.
 
@@ -91,7 +93,7 @@ gone. The reader has its own view, so nothing about browsing disturbs a live
 transcription.
 
 **The library cannot be opened while a recording or transcription is running.**
-`Transcripts > Saved Transcripts` greys out until the worker finishes, and the recording
+The whole navigation bar greys out until the worker finishes, and the recording
 shortcuts are inert while the library is showing.
 
 **Delete Transcript** sits in the bottom right corner, directly beneath the
@@ -103,7 +105,8 @@ Its colour is ember rather than plain red: destructive enough to give pause, but
 not the colour the interface uses for something having gone wrong.
 
 The recording the transcript came from is kept.
-`File > Delete All Recordings` remains the only way to remove audio.
+**Delete All Recordings**, at the top of this screen, remains the only way to
+remove audio.
 
 After a deletion the reader moves to a neighbouring transcript rather than
 going blank: the row that takes the deleted one's place, or the row above when
@@ -115,7 +118,7 @@ Right-clicking a row additionally offers:
 - **Copy** and **Save a Copy** of the transcript being read
 - **Audio:** which recordings survive for that session, or `not kept` when
   retention was off or they have been deleted
-- **Delete This Transcript** — the same action as the row control
+- **Delete This Transcript** — the same action as the button
 
 The list is rebuilt when a new transcript is saved and after deleting
 everything. With nothing stored it reads `No saved transcripts yet` rather than
@@ -136,7 +139,9 @@ memorised.
 | `Esc` | Cancel whatever the worker is doing |
 | `Ctrl+S` | Save the transcript to a file |
 | `Ctrl+Shift+C` | Copy the whole transcript |
-| `Ctrl+H` | Switch between recording and saved transcripts |
+| `Ctrl+1` | Go to Home |
+| `Ctrl+2` | Go to Recording |
+| `Ctrl+H` | Go to saved transcripts |
 | `Up` / `Down` | Move through the saved transcripts |
 | `Ctrl+Q` | Quit |
 

@@ -28,6 +28,7 @@
 #include <QTime>
 #include <QTextCursor>
 #include <QListWidget>
+#include <QActionGroup>
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -70,12 +71,6 @@ public:
         keep_audio_ = new QCheckBox("Keep audio files", central);
         keep_audio_->setChecked(true);
         keep_audio_->setToolTip("When off, audio is transcribed and discarded; no WAV file is written.");
-
-        home_from_record_ = new QPushButton("\u2190  Home", central);
-        auto* record_nav = new QHBoxLayout();
-        record_nav->addWidget(home_from_record_);
-        record_nav->addStretch();
-        layout->addLayout(record_nav);
 
         auto* settings = new QHBoxLayout();
         settings->setSpacing(8);
@@ -187,17 +182,16 @@ public:
         auto* library_layout = new QVBoxLayout(library_page);
         library_layout->setSpacing(12);
 
-        back_button_ = new QPushButton("\u2190  Home", library_page);
-        back_button_->setMinimumHeight(32);
         auto* library_header = new QHBoxLayout();
-        library_header->addWidget(back_button_);
-        library_header->addSpacing(16);
         auto* library_title = new QLabel("Saved transcripts", library_page);
         QFont library_font = library_title->font();
         library_font.setBold(true);
         library_title->setFont(library_font);
         library_header->addWidget(library_title);
         library_header->addStretch();
+        delete_all_button_ = new QPushButton("Delete All Recordings...", library_page);
+        delete_all_button_->setToolTip("Remove every stored recording and transcript");
+        library_header->addWidget(delete_all_button_);
         library_layout->addLayout(library_header);
 
         auto* library_body = new QHBoxLayout();
@@ -322,9 +316,8 @@ public:
         // Resolved here rather than waiting for the worker, so saved
         // transcripts can be read before anything has been recorded.
         data_directory_ = QString::fromStdString(application_data_directory().string());
-        connect(back_button_, &QPushButton::clicked, this, [this] { show_home(); });
-        connect(home_from_record_, &QPushButton::clicked, this, [this] { show_home(); });
         connect(go_record_button_, &QPushButton::clicked, this, [this] { show_recorder(); });
+        connect(delete_all_button_, &QPushButton::clicked, this, [this] { delete_recordings(); });
         connect(saved_copy_, &QPushButton::clicked, this, [this] { copy_saved(); });
         connect(saved_save_, &QPushButton::clicked, this, [this] { save_saved(); });
         connect(delete_saved_, &QPushButton::clicked, this, [this] { delete_selected_transcript(); });
@@ -599,44 +592,53 @@ private:
     // Secondary actions live here rather than in the toolbar. Deleting
     // recordings is destructive and should be reached deliberately, not brushed
     // past while choosing a microphone.
+    // The bar across the top is navigation. Pressing an entry goes to that
+    // screen and does nothing else: pressing Recording must not find that a
+    // recording has already started. Each screen owns its own actions.
     void build_menus() {
-        // Home holds only what belongs to the application as a whole. Saving
-        // and copying act on the transcript in front of you, so they live with
-        // it; deleting everything is about stored data, so it lives with the
-        // transcripts.
-        QMenu* home_menu = menuBar()->addMenu("&Home");
-        home_menu->addAction("&Quit", this, [this] { close(); })
-            ->setShortcut(QKeySequence::Quit);
+        auto* screens = new QActionGroup(this);
+        screens->setExclusive(true);
 
-        QMenu* recording_menu = menuBar()->addMenu("&Recording");
-        // One action rather than two, so a single key both starts and stops.
-        // The menu is what makes the shortcut discoverable.
-        record_action_ = recording_menu->addAction("&Start Recording", this, [this] {
-            if (state_ == UiState::Recording) {
-                stop_recording();
-            } else {
-                // Recording belongs to its own screen: go there first.
-                show_recorder();
-                start_recording();
-            }
-        });
-        record_action_->setShortcut(QKeySequence("Ctrl+R"));
-        cancel_action_ = recording_menu->addAction("&Cancel", this, [this] { cancel_work(); });
-        cancel_action_->setShortcut(QKeySequence(Qt::Key_Escape));
+        const auto add_screen = [this, screens](const QString& text, const QKeySequence& key,
+                                                auto handler) {
+            QAction* action = menuBar()->addAction(text);
+            action->setCheckable(true);
+            action->setShortcut(key);
+            screens->addAction(action);
+            connect(action, &QAction::triggered, this, handler);
+            return action;
+        };
 
-        QMenu* transcripts_menu = menuBar()->addMenu("&Transcripts");
-        history_action_ = transcripts_menu->addAction("&Saved Transcripts", this,
-                                                      [this] { toggle_library(); });
-        history_action_->setCheckable(true);
-        history_action_->setShortcut(QKeySequence("Ctrl+H"));
-        history_action_->setStatusTip("Read transcripts from earlier recordings");
-        transcripts_menu->addSeparator();
-        delete_action_ = transcripts_menu->addAction("&Delete All Recordings...", this,
-                                                     [this] { delete_recordings(); });
+        home_action_ = add_screen("&Home", QKeySequence("Ctrl+1"), [this] { show_home(); });
+        recorder_action_ = add_screen("&Recording", QKeySequence("Ctrl+2"),
+                                      [this] { show_recorder(); });
+        history_action_ = add_screen("&Transcripts", QKeySequence("Ctrl+H"),
+                                     [this] { show_library(); });
 
         QMenu* help_menu = menuBar()->addMenu("&Help");
         help_menu->addAction("&Privacy", this, [this] { show_privacy_notice(); });
         help_menu->addAction("&About", this, [this] { show_about(); });
+        help_menu->addSeparator();
+        help_menu->addAction("&Quit", this, [this] { close(); })
+            ->setShortcut(QKeySequence::Quit);
+
+        // Recording keys stay available without occupying the navigation bar.
+        record_action_ = new QAction(this);
+        record_action_->setShortcut(QKeySequence("Ctrl+R"));
+        connect(record_action_, &QAction::triggered, this, [this] {
+            if (state_ == UiState::Recording) {
+                stop_recording();
+            } else {
+                show_recorder();
+                start_recording();
+            }
+        });
+        addAction(record_action_);
+
+        cancel_action_ = new QAction(this);
+        cancel_action_->setShortcut(QKeySequence(Qt::Key_Escape));
+        connect(cancel_action_, &QAction::triggered, this, [this] { cancel_work(); });
+        addAction(cancel_action_);
     }
 
     // One line replacing four stacked labels. Only what is known is shown, so a
@@ -698,16 +700,17 @@ private:
 
         save_button_->setEnabled(controls.save);
         copy_button_->setEnabled(controls.copy);
-        delete_action_->setEnabled(controls.delete_recordings);
         record_action_->setEnabled(controls.start || controls.stop);
         record_action_->setText(controls.stop ? "&Stop Recording" : "&Start Recording");
         cancel_action_->setEnabled(controls.cancel);
 
         history_list_->setEnabled(controls.history);
+        // Navigating away mid-recording would hide the controls for the thing
+        // still running, so the bar closes while it does.
         history_action_->setEnabled(controls.history);
-        // Leaving the recording screen mid-recording would hide the controls
-        // for the thing still running, so the way out closes while it does.
-        home_from_record_->setEnabled(!ui_state_is_busy(state));
+        home_action_->setEnabled(!ui_state_is_busy(state));
+        recorder_action_->setEnabled(!ui_state_is_busy(state));
+        delete_all_button_->setEnabled(controls.delete_recordings);
 
         apply_indicator(state);
         explain_disabled_controls(state, controls);
@@ -802,7 +805,7 @@ private:
             return;
         }
         stack_->setCurrentIndex(0);
-        history_action_->setChecked(false);
+        home_action_->setChecked(true);
         context_label_->setText("Ready when you are");
         apply_state(state_);
     }
@@ -827,7 +830,7 @@ private:
 
     void show_recorder() {
         stack_->setCurrentIndex(1);
-        history_action_->setChecked(false);
+        recorder_action_->setChecked(true);
         update_context_bar();
         apply_state(state_);
     }
@@ -1330,9 +1333,8 @@ private:
     QLabel* transcript_title_;
     QListWidget* history_list_;
     QStackedWidget* stack_;
-    QPushButton* back_button_;
-    QPushButton* home_from_record_;
     QPushButton* go_record_button_;
+    QPushButton* delete_all_button_;
     QPlainTextEdit* saved_view_;
     QLabel* saved_title_;
     QPushButton* saved_save_;
@@ -1344,7 +1346,8 @@ private:
     QString model_summary_;
     QString input_summary_;
     QString storage_summary_;
-    QAction* delete_action_;
+    QAction* home_action_;
+    QAction* recorder_action_;
     QAction* record_action_;
     QAction* cancel_action_;
     QProgressBar* progress_;
