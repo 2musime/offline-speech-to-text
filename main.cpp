@@ -472,36 +472,6 @@ void streaming_worker(
               << process_cpu_milliseconds() - cpu_start << " ms" << std::endl;
 }
 
-bool compare_transcription(
-    whisper_context* context,
-    const std::vector<std::int16_t>& original,
-    const std::vector<std::int16_t>& cleaned,
-    const std::vector<SpeechSegment>& segments,
-    int thread_count) {
-    TranscriptionResult original_result;
-    TranscriptionResult cleaned_result;
-    if (!run_transcription(context, original, segments, thread_count, original_result) ||
-        !run_transcription(context, cleaned, segments, thread_count, cleaned_result)) {
-        return false;
-    }
-
-    std::ofstream file("transcription.txt");
-    if (!file) {
-        std::cerr << "Could not save transcription.txt." << std::endl;
-        return false;
-    }
-    file << cleaned_result.text << '\n';
-
-    std::cout << "\nOriginal transcription ("
-              << original_result.milliseconds << " ms):\n"
-              << original_result.text << std::endl;
-    std::cout << "Cleaned transcription ("
-              << cleaned_result.milliseconds << " ms):\n"
-              << cleaned_result.text << std::endl;
-    std::cout << "Saved cleaned transcription to transcription.txt" << std::endl;
-    return true;
-}
-
 int default_thread_count() {
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
     if (hardware_threads <= 1) {
@@ -806,7 +776,7 @@ int main(int argc, char** argv) {
             }
         } else if (context != nullptr) {
             const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
-            if (!compare_transcription(context, speech, cleaned_speech, speech_range, thread_count)) {
+            if (!transcribe(context, speech, speech_range, thread_count)) {
                 break;
             }
         }

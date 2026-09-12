@@ -104,8 +104,7 @@ private:
         }
 
         transcript_->clear();
-        original_transcription_.clear();
-        cleaned_transcription_.clear();
+        final_transcription_.clear();
         const QString model = model_selector_->currentData().toString();
         const QString duration = duration_selector_->currentData().toString();
         process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
@@ -152,11 +151,8 @@ private:
         if (!pending_text_label_.isEmpty()) {
             if (pending_text_label_ == "partial") {
                 append_partial_text(line);
-            } else if (pending_text_label_ == "original") {
-                original_transcription_ = line;
-                render_final_transcription();
-            } else if (pending_text_label_ == "cleaned" || pending_text_label_ == "final") {
-                cleaned_transcription_ = line;
+            } else if (pending_text_label_ == "final") {
+                final_transcription_ = line;
                 render_final_transcription();
             } else {
                 transcript_->setPlainText(line);
@@ -169,14 +165,6 @@ private:
             pending_text_label_ = "partial";
             return;
         }
-        if (line.startsWith("Original transcription (")) {
-            pending_text_label_ = "original";
-            return;
-        }
-        if (line.startsWith("Cleaned transcription (")) {
-            pending_text_label_ = "cleaned";
-            return;
-        }
         if (line == "Transcription:") {
             pending_text_label_ = "final";
             return;
@@ -185,7 +173,7 @@ private:
             set_status("Recording stopped at the selected limit; processing...");
             return;
         }
-        if (line.contains("Saved cleaned transcription")) {
+        if (line.contains("Saved transcription.txt")) {
             save_button_->setEnabled(true);
             copy_button_->setEnabled(true);
             set_status("Transcription complete");
@@ -253,20 +241,11 @@ private:
     }
 
     void render_final_transcription() {
-        QString text;
-        if (!original_transcription_.isEmpty()) {
-            text += "What you said:\n" + original_transcription_;
+        if (final_transcription_.isEmpty()) {
+            return;
         }
-        if (!cleaned_transcription_.isEmpty()) {
-            if (!text.isEmpty()) {
-                text += "\n\n";
-            }
-            text += "Cleaned version:\n" + cleaned_transcription_;
-        }
-        if (!text.isEmpty()) {
-            transcript_->setPlainText(text);
-            transcript_->moveCursor(QTextCursor::End);
-        }
+        transcript_->setPlainText(final_transcription_);
+        transcript_->moveCursor(QTextCursor::End);
     }
 
     void set_status(const QString& status) {
@@ -298,8 +277,7 @@ private:
     QTime started_at_;
     QString output_buffer_;
     QString pending_text_label_;
-    QString original_transcription_;
-    QString cleaned_transcription_;
+    QString final_transcription_;
 };
 
 int main(int argc, char* argv[]) {
