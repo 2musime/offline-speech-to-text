@@ -50,8 +50,10 @@ public:
 
         status_label_ = new QLabel("Ready", central);
         duration_label_ = new QLabel("Duration: 00:00", central);
+        model_label_ = new QLabel("Model: not loaded", central);
         layout->addWidget(status_label_);
         layout->addWidget(duration_label_);
+        layout->addWidget(model_label_);
 
         transcript_ = new QPlainTextEdit(central);
         transcript_->setPlaceholderText("Transcription will appear here...");
@@ -110,6 +112,7 @@ private:
         transcript_->clear();
         final_transcription_.clear();
         transcript_path_.clear();
+        model_label_->setText("Model: validating...");
         completed_ = false;
         error_shown_ = false;
         const QString model = model_selector_->currentData().toString();
@@ -165,6 +168,11 @@ private:
             return;
         }
 
+        if (line.startsWith("MODEL|")) {
+            handle_model_line(line);
+            return;
+        }
+
         if (!pending_text_label_.isEmpty()) {
             if (pending_text_label_ == "partial") {
                 append_partial_text(line);
@@ -186,6 +194,20 @@ private:
             pending_text_label_ = "final";
             return;
         }
+    }
+
+    // The worker reports the validated model as MODEL|variant|language|bytes|path.
+    void handle_model_line(const QString& line) {
+        const QStringList parts = line.split('|');
+        if (parts.size() < 5) {
+            return;
+        }
+
+        const QString variant = parts.at(1);
+        const QString language = parts.at(2) == "multilingual" ? "multilingual" : "English-only";
+        const double megabytes = parts.at(3).toDouble() / (1024.0 * 1024.0);
+        model_label_->setText(QString("Model: %1, %2, %3 MB")
+            .arg(variant, language, QString::number(megabytes, 'f', 1)));
     }
 
     // The worker announces each artefact as SAVED|KIND|path.
@@ -360,6 +382,7 @@ private:
     QPushButton* copy_button_;
     QLabel* status_label_;
     QLabel* duration_label_;
+    QLabel* model_label_;
     QPlainTextEdit* transcript_;
     QProcess* process_;
     QTimer* timer_;
