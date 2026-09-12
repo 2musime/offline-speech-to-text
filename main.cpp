@@ -83,6 +83,57 @@ struct SpeechSegment {
     std::size_t end;
 };
 
+struct NoiseProfile {
+    float noise_rms;
+    float attenuation_threshold;
+};
+
+NoiseProfile measure_noise_floor(
+    const std::vector<std::int16_t>& samples,
+    std::uint32_t sample_rate) {
+    constexpr std::size_t frame_duration_ms = 20;
+    constexpr float noise_multiplier = 1.5f;
+    constexpr float minimum_threshold = 0.003f;
+
+    const std::size_t frame_size = sample_rate * frame_duration_ms / 1000;
+    const std::size_t frame_count = (samples.size() + frame_size - 1) / frame_size;
+    if (frame_count == 0) {
+        return {0.0f, minimum_threshold};
+    }
+
+    std::vector<float> energies;
+    energies.reserve(frame_count);
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+        const std::size_t begin = frame * frame_size;
+        const std::size_t end = std::min(begin + frame_size, samples.size());
+        float sum = 0.0f;
+        for (std::size_t i = begin; i < end; ++i) {
+            const float sample = static_cast<float>(samples[i]) / 32768.0f;
+            sum += sample * sample;
+        }
+        energies.push_back(std::sqrt(sum / static_cast<float>(end - begin)));
+    }
+
+    std::sort(energies.begin(), energies.end());
+    const float noise_rms = energies[energies.size() / 5];
+    return {noise_rms, std::max(minimum_threshold, noise_rms * noise_multiplier)};
+}
+
+std::vector<std::int16_t> reduce_noise(
+    const std::vector<std::int16_t>& samples,
+    const NoiseProfile& profile) {
+    std::vector<std::int16_t> cleaned(samples);
+    for (std::int16_t& sample : cleaned) {
+        const float value = static_cast<float>(sample) / 32768.0f;
+        const float magnitude = std::abs(value);
+        if (magnitude < profile.attenuation_threshold) {
+            const float retained = magnitude / profile.attenuation_threshold;
+            sample = static_cast<std::int16_t>(value * retained * 32768.0f);
+        }
+    }
+    return cleaned;
+}
+
 std::vector<SpeechSegment> detect_speech_segments(
     const std::vector<std::int16_t>& samples,
     std::uint32_t sample_rate) {
@@ -238,6 +289,36 @@ bool transcribe(
     return true;
 }
 
+bool compare_transcription(
+    whisper_context* context,
+    const std::vector<std::int16_t>& original,
+    const std::vector<std::int16_t>& cleaned,
+    const std::vector<SpeechSegment>& segments,
+    int thread_count) {
+    TranscriptionResult original_result;
+    TranscriptionResult cleaned_result;
+    if (!run_transcription(context, original, segments, thread_count, original_result) ||
+        !run_transcription(context, cleaned, segments, thread_count, cleaned_result)) {
+        return false;
+    }
+
+    std::ofstream file("transcription.txt");
+    if (!file) {
+        std::cerr << "Could not save transcription.txt." << std::endl;
+        return false;
+    }
+    file << cleaned_result.text << '\n';
+
+    std::cout << "\nOriginal transcription ("
+              << original_result.milliseconds << " ms):\n"
+              << original_result.text << std::endl;
+    std::cout << "Cleaned transcription ("
+              << cleaned_result.milliseconds << " ms):\n"
+              << cleaned_result.text << std::endl;
+    std::cout << "Saved cleaned transcription to transcription.txt" << std::endl;
+    return true;
+}
+
 int default_thread_count() {
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
     if (hardware_threads <= 1) {
@@ -315,10 +396,11 @@ bool parse_options(
 
 bool compare_models(
     const std::vector<std::string>& model_paths,
-    const std::vector<std::int16_t>& samples,
-    const std::vector<SpeechSegment>& segments,
+    const std::vector<std::int16_t>& original,
+    const std::vector<std::int16_t>& cleaned,
     int thread_count) {
     std::cout << "\nModel comparison (same audio and VAD segments):\n";
+    const std::vector<SpeechSegment> speech_range{{0, original.size()}};
     for (const std::string& model_path : model_paths) {
         whisper_context_params context_params = whisper_context_default_params();
         whisper_context* context = whisper_init_from_file_with_params(model_path.c_str(), context_params);
@@ -327,8 +409,11 @@ bool compare_models(
             return false;
         }
 
-        TranscriptionResult result;
-        const bool success = run_transcription(context, samples, segments, thread_count, result);
+        TranscriptionResult original_result;
+        TranscriptionResult cleaned_result;
+        const bool success = run_transcription(
+                context, original, speech_range, thread_count, original_result) &&
+            run_transcription(context, cleaned, speech_range, thread_count, cleaned_result);
         const long memory_kb = peak_memory_kb();
         whisper_free(context);
         if (!success) {
@@ -340,9 +425,11 @@ bool compare_models(
         const double model_size_mb = error ? 0.0 : model_size / (1024.0 * 1024.0);
         std::cout << "\nModel: " << model_path
                   << "\n  Size: " << model_size_mb << " MB"
-                  << "\n  Processing time: " << result.milliseconds << " ms"
+                  << "\n  Original processing time: " << original_result.milliseconds << " ms"
+                  << "\n  Cleaned processing time: " << cleaned_result.milliseconds << " ms"
                   << "\n  Peak memory: " << memory_kb << " KB"
-                  << "\n  Transcription: " << result.text << std::endl;
+                  << "\n  Original transcription: " << original_result.text
+                  << "\n  Cleaned transcription: " << cleaned_result.text << std::endl;
     }
     return true;
 }
@@ -416,6 +503,21 @@ int main(int argc, char** argv) {
                   << recording.samples.size() / static_cast<double>(sample_rate)
                   << " seconds)." << std::endl;
 
+        const NoiseProfile noise_profile = measure_noise_floor(recording.samples, sample_rate);
+        const std::vector<std::int16_t> cleaned_samples = reduce_noise(recording.samples, noise_profile);
+        if (!write_wav("cleaned.wav", cleaned_samples, sample_rate)) {
+            std::cerr << "Could not save cleaned.wav." << std::endl;
+            break;
+        }
+
+        const float noise_db = noise_profile.noise_rms > 0.0f
+            ? 20.0f * std::log10(noise_profile.noise_rms)
+            : -std::numeric_limits<float>::infinity();
+        std::cout << "Measured noise floor: " << noise_profile.noise_rms
+                  << " RMS (" << noise_db << " dBFS), attenuation threshold: "
+                  << noise_profile.attenuation_threshold << std::endl;
+        std::cout << "Saved cleaned.wav (speech length preserved)." << std::endl;
+
         const auto vad_start = std::chrono::steady_clock::now();
         const std::vector<SpeechSegment> speech_segments = detect_speech_segments(recording.samples, sample_rate);
         const auto vad_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -427,6 +529,7 @@ int main(int argc, char** argv) {
         }
 
         const std::vector<std::int16_t> speech = extract_speech(recording.samples, speech_segments);
+        const std::vector<std::int16_t> cleaned_speech = extract_speech(cleaned_samples, speech_segments);
         if (!write_wav("speech.wav", speech, sample_rate)) {
             std::cerr << "Could not save speech.wav." << std::endl;
             break;
@@ -441,11 +544,14 @@ int main(int argc, char** argv) {
                   << " VAD time: " << vad_ms << " ms" << std::endl;
 
         if (compare_mode) {
-            if (!compare_models(model_paths, recording.samples, speech_segments, thread_count)) {
+            if (!compare_models(model_paths, speech, cleaned_speech, thread_count)) {
                 break;
             }
-        } else if (context != nullptr && !transcribe(context, recording.samples, speech_segments, thread_count)) {
-            break;
+        } else if (context != nullptr) {
+            const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
+            if (!compare_transcription(context, speech, cleaned_speech, speech_range, thread_count)) {
+                break;
+            }
         }
     }
 

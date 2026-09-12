@@ -34,12 +34,12 @@ cmake --build build -j2
   --threads 4
 ```
 
-Record one utterance. The same raw recording and the same VAD speech segments are sent to every model. The output reports:
+Record one utterance. The same VAD speech range is sent to every model in both original and cleaned forms. The output reports:
 
 - model file size
-- Whisper processing time
+- original and cleaned Whisper processing time
 - peak resident memory of the process
-- transcription text for manual accuracy comparison
+- original and cleaned transcription text for manual accuracy comparison
 
 Use the same fixed sentence and repeat the comparison for a fair result. Accuracy still requires a known reference transcript; compare each output against the words you intentionally spoke.
 
