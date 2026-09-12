@@ -1856,6 +1856,7 @@ int run(int argc, char** argv) {
     std::cout << "Microphone: " << active_name << std::endl;
 
     while (!shutdown_is_requested()) {
+        std::cout << "READY|" << std::endl;
         std::cout << "Press Enter to start recording, or type q to quit." << std::endl;
         std::string command;
         const bool have_command = read_command(command);
@@ -1895,6 +1896,7 @@ int run(int argc, char** argv) {
 
         // Whatever mode ran, anything still buffered belongs to this recording.
         drain_capture(capture, recorded_samples, drain_scratch, maximum_samples);
+        std::cout << "PROCESSING|" << std::endl;
 
         if (shutdown_is_requested()) {
             break;
