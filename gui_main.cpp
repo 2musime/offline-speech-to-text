@@ -579,11 +579,12 @@ private:
         cancel_action_ = recording_menu->addAction("&Cancel", this, [this] { cancel_work(); });
         cancel_action_->setShortcut(QKeySequence(Qt::Key_Escape));
 
-        QMenu* view_menu = menuBar()->addMenu("&View");
-        history_action_ = view_menu->addAction("Saved &Transcripts", this,
+        QMenu* transcripts_menu = menuBar()->addMenu("&Transcripts");
+        history_action_ = transcripts_menu->addAction("&Saved Transcripts", this,
                                                [this] { toggle_library(); });
         history_action_->setCheckable(true);
         history_action_->setShortcut(QKeySequence("Ctrl+H"));
+        history_action_->setStatusTip("Read transcripts from earlier recordings");
 
         QMenu* help_menu = menuBar()->addMenu("&Help");
         help_menu->addAction("&Privacy", this, [this] { show_privacy_notice(); });
@@ -814,13 +815,17 @@ private:
         }
     }
 
+    void clear_reader() {
+        saved_view_->clear();
+        saved_title_->setText("Select a transcript to read it");
+        saved_save_->setEnabled(false);
+        saved_copy_->setEnabled(false);
+        delete_saved_->setEnabled(false);
+    }
+
     void show_history_entry(int row) {
         if (row < 0 || row >= static_cast<int>(entries_.size())) {
-            saved_view_->clear();
-            saved_title_->setText("Select a transcript to read it");
-            saved_save_->setEnabled(false);
-            saved_copy_->setEnabled(false);
-            delete_saved_->setEnabled(false);
+            clear_reader();
             return;
         }
         const TranscriptEntry& entry = entries_[static_cast<std::size_t>(row)];
@@ -873,19 +878,38 @@ private:
         }
 
         std::string reason;
-        if (!delete_transcript(path, fs::path(data_directory_.toStdString()), reason)) {
+        if (!remove_transcript(path, reason)) {
             QMessageBox::warning(this, "Could not delete", QString::fromStdString(reason));
             return;
         }
-
-        // Whatever was being read may be the file just removed.
-        saved_view_->clear();
-        saved_title_->setText("Select a transcript to read it");
-        saved_save_->setEnabled(false);
-        saved_copy_->setEnabled(false);
-        delete_saved_->setEnabled(false);
-        refresh_history();
         statusBar()->showMessage("Transcript deleted", 3000);
+    }
+
+    // The deletion itself, separated from asking: this is what decides where
+    // the reader lands afterwards, and it is worth being able to exercise.
+    bool remove_transcript(const fs::path& path, std::string& reason) {
+        if (!delete_transcript(path, fs::path(data_directory_.toStdString()), reason)) {
+            return false;
+        }
+
+        // Deleting should leave you somewhere, not staring at an empty box.
+        // The row that takes the deleted one's place is the natural next thing
+        // to read; at the end of the list that is the one above instead.
+        const int removed_row = history_list_->currentRow();
+        refresh_history();
+
+        const int remaining = static_cast<int>(entries_.size());
+        if (remaining == 0) {
+            clear_reader();
+        } else {
+            const int next = qBound(0, removed_row, remaining - 1);
+            const QSignalBlocker blocker(history_list_);
+            history_list_->setCurrentRow(next);
+            // Called directly: the row index may be unchanged, so relying on
+            // the selection signal would leave the old text on screen.
+            show_history_entry(next);
+        }
+        return true;
     }
 
     void show_history_menu(const QPoint& at) {

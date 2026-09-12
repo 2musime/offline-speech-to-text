@@ -43,7 +43,7 @@ window suggests stalled work.
 
 ## Saved transcripts
 
-`View > Saved Transcripts`, or `Ctrl+H`, replaces the window with the library: a
+`Transcripts > Saved Transcripts`, or `Ctrl+H`, replaces the window with the library: a
 list of every transcript the application has written, newest first, each row
 showing when it was recorded and the opening words. **Back to Recording** returns.
 
@@ -58,7 +58,7 @@ gone. The reader has its own view, so nothing about browsing disturbs a live
 transcription.
 
 **The library cannot be opened while a recording or transcription is running.**
-`View > Saved Transcripts` greys out until the worker finishes, and the recording
+`Transcripts > Saved Transcripts` greys out until the worker finishes, and the recording
 shortcuts are inert while the library is showing.
 
 **Delete Transcript** sits in the bottom right corner, directly beneath the
@@ -71,6 +71,11 @@ not the colour the interface uses for something having gone wrong.
 
 The recording the transcript came from is kept.
 `File > Delete All Recordings` remains the only way to remove audio.
+
+After a deletion the reader moves to a neighbouring transcript rather than
+going blank: the row that takes the deleted one's place, or the row above when
+the deleted one was last. Only when nothing is left does the reader empty and
+the list show `No saved transcripts yet`.
 
 Right-clicking a row additionally offers:
 
@@ -98,7 +103,7 @@ memorised.
 | `Esc` | Cancel whatever the worker is doing |
 | `Ctrl+S` | Save the transcript to a file |
 | `Ctrl+Shift+C` | Copy the whole transcript |
-| `Ctrl+H` | Show or hide the saved transcripts panel |
+| `Ctrl+H` | Switch between recording and saved transcripts |
 | `Up` / `Down` | Move through the saved transcripts |
 | `Ctrl+Q` | Quit |
 
