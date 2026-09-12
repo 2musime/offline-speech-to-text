@@ -66,14 +66,7 @@ bool write_wav(const char* path, const std::vector<std::int16_t>& samples, std::
     return file.good();
 }
 
-bool transcribe(const char* model_path, const std::vector<std::int16_t>& samples) {
-    whisper_context_params context_params = whisper_context_default_params();
-    whisper_context* context = whisper_init_from_file_with_params(model_path, context_params);
-    if (context == nullptr) {
-        std::cerr << "Could not load Whisper model: " << model_path << std::endl;
-        return false;
-    }
-
+bool transcribe(whisper_context* context, const std::vector<std::int16_t>& samples) {
     std::vector<float> audio(samples.size());
     for (std::size_t i = 0; i < samples.size(); ++i) {
         audio[i] = static_cast<float>(samples[i]) / 32768.0f;
@@ -88,7 +81,6 @@ bool transcribe(const char* model_path, const std::vector<std::int16_t>& samples
 
     if (whisper_full(context, params, audio.data(), audio.size()) != 0) {
         std::cerr << "Whisper could not process the recording." << std::endl;
-        whisper_free(context);
         return false;
     }
 
@@ -96,8 +88,6 @@ bool transcribe(const char* model_path, const std::vector<std::int16_t>& samples
     for (int i = 0; i < whisper_full_n_segments(context); ++i) {
         transcription += whisper_full_get_segment_text(context, i);
     }
-    whisper_free(context);
-
     std::ofstream file("transcription.txt");
     if (!file) {
         std::cerr << "Could not save transcription.txt." << std::endl;
@@ -114,6 +104,16 @@ int main(int argc, char** argv) {
     constexpr ma_uint32 sample_rate = WHISPER_SAMPLE_RATE;
     Recording recording;
 
+    whisper_context* context = nullptr;
+    if (argc >= 2) {
+        whisper_context_params context_params = whisper_context_default_params();
+        context = whisper_init_from_file_with_params(argv[1], context_params);
+        if (context == nullptr) {
+            std::cerr << "Could not load Whisper model: " << argv[1] << std::endl;
+            return 1;
+        }
+    }
+
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
     config.capture.format = ma_format_s16;
     config.capture.channels = 1;
@@ -127,37 +127,43 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "Press Enter to start recording." << std::endl;
-    std::cin.get();
+    while (true) {
+        std::cout << "Press Enter to start recording, or type q to quit." << std::endl;
+        std::string command;
+        std::getline(std::cin, command);
+        if (!std::cin || command == "q" || command == "Q") {
+            break;
+        }
 
-    if (ma_device_start(&device) != MA_SUCCESS) {
-        std::cerr << "Could not start recording." << std::endl;
-        ma_device_uninit(&device);
-        return 1;
+        {
+            std::lock_guard<std::mutex> lock(recording.mutex);
+            recording.samples.clear();
+        }
+
+        if (ma_device_start(&device) != MA_SUCCESS) {
+            std::cerr << "Could not start recording." << std::endl;
+            break;
+        }
+
+        std::cout << "Recording... Press Enter to stop." << std::endl;
+        std::getline(std::cin, command);
+        ma_device_stop(&device);
+
+        if (!write_wav("recording.wav", recording.samples, sample_rate)) {
+            std::cerr << "Could not save recording.wav." << std::endl;
+            break;
+        }
+
+        std::cout << "Saved recording.wav ("
+                  << recording.samples.size() / static_cast<double>(sample_rate)
+                  << " seconds)." << std::endl;
+
+        if (context != nullptr && !transcribe(context, recording.samples)) {
+            break;
+        }
     }
 
-    std::cout << "Recording... Press Enter to stop." << std::endl;
-    std::cin.get();
-    ma_device_stop(&device);
     ma_device_uninit(&device);
-
-    if (!write_wav("recording.wav", recording.samples, sample_rate)) {
-        std::cerr << "Could not save recording.wav." << std::endl;
-        return 1;
-    }
-
-    std::cout << "Saved recording.wav ("
-              << recording.samples.size() / static_cast<double>(sample_rate)
-              << " seconds)." << std::endl;
-
-    if (argc < 2) {
-        std::cout << "To transcribe it, run again with a model path, for example:\n"
-                  << "  ./build/audio_to_text models/ggml-base.en.bin" << std::endl;
-        return 0;
-    }
-
-    if (!transcribe(argv[1], recording.samples)) {
-        return 1;
-    }
+    whisper_free(context);
     return 0;
 }
