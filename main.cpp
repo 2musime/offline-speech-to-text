@@ -7,6 +7,7 @@
 #include "file_storage.h"
 #include "model_info.h"
 #include "speech_detection.h"
+#include "version.h"
 #include "wav_io.h"
 
 #include <algorithm>
@@ -959,6 +960,13 @@ bool parse_options(
             retain_transcript = false;
         } else if (argument == "--delete-recordings") {
             delete_recordings = true;
+        } else if (argument == "--version" || argument == "-v") {
+            std::cout << "audio_to_text " << AUDIO_TO_TEXT_VERSION
+                      << " (" << AUDIO_TO_TEXT_GIT_COMMIT << ", "
+                      << AUDIO_TO_TEXT_BUILD_TYPE << ")" << std::endl;
+            std::cout << "VERSION|" << AUDIO_TO_TEXT_VERSION
+                      << '|' << AUDIO_TO_TEXT_GIT_COMMIT << std::endl;
+            return false;
         } else if (argument == "--privacy") {
             show_privacy = true;
         } else if (argument == "--list-devices") {
@@ -996,6 +1004,7 @@ bool parse_options(
                       << "      [--no-retain-audio] [--no-retain-transcript]\n"
                       << "  ./build-release/audio_to_text_cli --list-devices\n"
                       << "  ./build-release/audio_to_text_cli --privacy\n"
+                      << "  ./build-release/audio_to_text_cli --version\n"
                       << "  ./build-release/audio_to_text_cli --delete-recordings\n"
                       << "  ./build-release/audio_to_text_cli --benchmark --input SPEECH.wav\n"
                       << "      MODEL_PATH ... [--threads N]\n"
@@ -1103,7 +1112,14 @@ int run(int argc, char** argv) {
                        model_paths, model_directories, device_index, list_devices,
                        benchmark_mode, input_path, threads_explicit,
                        retain_audio, retain_transcript, delete_recordings, show_privacy)) {
-        return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument = argv[i];
+            if (argument == "--help" || argument == "-h" ||
+                argument == "--version" || argument == "-v") {
+                return 0;
+            }
+        }
+        return 1;
     }
 
     install_shutdown_handlers();

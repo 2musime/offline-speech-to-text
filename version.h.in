@@ -1,0 +1,7 @@
+#pragma once
+
+// Generated from version.h.in by CMake. Do not edit the generated copy.
+
+#define AUDIO_TO_TEXT_VERSION "@PROJECT_VERSION@"
+#define AUDIO_TO_TEXT_GIT_COMMIT "@AUDIO_TO_TEXT_GIT_COMMIT@"
+#define AUDIO_TO_TEXT_BUILD_TYPE "@CMAKE_BUILD_TYPE@"
