@@ -8,9 +8,12 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <numeric>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct Recording {
@@ -166,7 +169,8 @@ std::vector<std::int16_t> extract_speech(
 bool transcribe(
     whisper_context* context,
     const std::vector<std::int16_t>& samples,
-    const std::vector<SpeechSegment>& segments) {
+    const std::vector<SpeechSegment>& segments,
+    int thread_count) {
     std::string transcription;
     const auto transcription_start = std::chrono::steady_clock::now();
     for (const SpeechSegment& segment : segments) {
@@ -182,6 +186,7 @@ bool transcribe(
         params.print_timestamps = false;
         params.single_segment = false;
         params.language = "en";
+        params.n_threads = thread_count;
 
         if (whisper_full(context, params, audio.data(), audio.size()) != 0) {
             std::cerr << "Whisper could not process the speech segment." << std::endl;
@@ -208,16 +213,68 @@ bool transcribe(
     return true;
 }
 
+int default_thread_count() {
+    const unsigned int hardware_threads = std::thread::hardware_concurrency();
+    if (hardware_threads <= 1) {
+        return 1;
+    }
+    return static_cast<int>(hardware_threads - 1);
+}
+
+bool parse_thread_count(int argc, char** argv, int& thread_count, const char*& model_path) {
+    thread_count = default_thread_count();
+    model_path = nullptr;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "--threads") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value after --threads." << std::endl;
+                return false;
+            }
+            try {
+                const long parsed = std::stol(argv[++i]);
+                if (parsed < 1 || parsed > std::numeric_limits<int>::max()) {
+                    throw std::out_of_range("thread count");
+                }
+                thread_count = static_cast<int>(parsed);
+            } catch (const std::exception&) {
+                std::cerr << "Thread count must be a positive integer." << std::endl;
+                return false;
+            }
+        } else if (argument == "--help" || argument == "-h") {
+            std::cout << "Usage: ./build/audio_to_text MODEL_PATH [--threads N]" << std::endl;
+            return false;
+        } else if (model_path == nullptr) {
+            model_path = argv[i];
+        } else {
+            std::cerr << "Unknown argument: " << argument << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
     constexpr ma_uint32 sample_rate = WHISPER_SAMPLE_RATE;
     Recording recording;
 
+    int thread_count = 0;
+    const char* model_path = nullptr;
+    if (!parse_thread_count(argc, argv, thread_count, model_path)) {
+        return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
+    }
+
+    const unsigned int hardware_threads = std::thread::hardware_concurrency();
+    std::cout << "CPU threads detected: " << (hardware_threads == 0 ? 1 : hardware_threads)
+              << ", Whisper threads: " << thread_count << std::endl;
+
     whisper_context* context = nullptr;
-    if (argc >= 2) {
+    if (model_path != nullptr) {
         whisper_context_params context_params = whisper_context_default_params();
-        context = whisper_init_from_file_with_params(argv[1], context_params);
+        context = whisper_init_from_file_with_params(model_path, context_params);
         if (context == nullptr) {
-            std::cerr << "Could not load Whisper model: " << argv[1] << std::endl;
+            std::cerr << "Could not load Whisper model: " << model_path << std::endl;
             return 1;
         }
     }
@@ -290,7 +347,7 @@ int main(int argc, char** argv) {
         std::cout << "Saved speech.wav. Removed " << reduction << "% of recorded audio."
                   << " VAD time: " << vad_ms << " ms" << std::endl;
 
-        if (context != nullptr && !transcribe(context, recording.samples, speech_segments)) {
+        if (context != nullptr && !transcribe(context, recording.samples, speech_segments, thread_count)) {
             break;
         }
     }
