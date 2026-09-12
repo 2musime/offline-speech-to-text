@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QFileDialog>
@@ -65,14 +66,25 @@ public:
 
         auto* input_controls = new QHBoxLayout();
         device_selector_ = new QComboBox(central);
+        keep_audio_ = new QCheckBox("Keep audio files", central);
+        keep_audio_->setChecked(true);
+        keep_audio_->setToolTip("When off, audio is transcribed and discarded; no WAV file is written.");
+        privacy_button_ = new QPushButton("Privacy", central);
+        delete_button_ = new QPushButton("Delete recordings", central);
+
         input_controls->addWidget(new QLabel("Microphone:", central));
         input_controls->addWidget(device_selector_, 1);
+        input_controls->addWidget(keep_audio_);
+        input_controls->addWidget(privacy_button_);
+        input_controls->addWidget(delete_button_);
         layout->addLayout(input_controls);
 
         status_label_ = new QLabel("Ready", central);
         duration_label_ = new QLabel("Duration: 00:00", central);
         model_label_ = new QLabel("Model: not loaded", central);
         input_label_ = new QLabel("Input: not selected", central);
+        storage_label_ = new QLabel("Saving to: not known yet", central);
+        storage_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         latency_label_ = new QLabel("", central);
         progress_ = new QProgressBar(central);
         progress_->setTextVisible(false);
@@ -82,6 +94,7 @@ public:
         layout->addWidget(duration_label_);
         layout->addWidget(model_label_);
         layout->addWidget(input_label_);
+        layout->addWidget(storage_label_);
         layout->addWidget(latency_label_);
         layout->addWidget(progress_);
 
@@ -116,6 +129,8 @@ public:
             QApplication::clipboard()->setText(transcript_->toPlainText());
         });
         connect(save_button_, &QPushButton::clicked, this, [this] { save_transcript(); });
+        connect(privacy_button_, &QPushButton::clicked, this, [this] { show_privacy_notice(); });
+        connect(delete_button_, &QPushButton::clicked, this, [this] { delete_recordings(); });
         connect(process_, &QProcess::readyRead, this, [this] { consume_worker_output(); });
         connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
             if (closing_ || error == QProcess::Crashed) {
@@ -162,6 +177,9 @@ private:
         const QString duration = duration_selector_->currentData().toString();
         // No --threads: the worker's measured default is the single source of truth.
         QStringList arguments{model, "--stream", "--duration", duration};
+        if (!keep_audio_->isChecked()) {
+            arguments << "--no-retain-audio";
+        }
         const int device = device_selector_->currentData().toInt();
         if (device >= 0) {
             arguments << "--device" << QString::number(device);
@@ -250,6 +268,20 @@ private:
         if (line.startsWith("FINAL|")) {
             final_transcription_ = line.section('|', 1);
             render_final_transcription();
+            // Completion is keyed off the transcription itself, not off a file
+            // being written, so it still works when retention is off.
+            completed_ = true;
+            apply_state(UiState::Completed);
+            set_status("Transcription complete");
+            if (process_->state() == QProcess::Running) {
+                process_->write("q\n");
+            }
+            return;
+        }
+
+        if (line.startsWith("DATADIR|")) {
+            data_directory_ = line.section('|', 1);
+            storage_label_->setText("Saving to: " + data_directory_);
             return;
         }
 
@@ -289,6 +321,9 @@ private:
         model_selector_->setEnabled(idle);
         duration_selector_->setEnabled(idle);
         device_selector_->setEnabled(idle && devices_ready_);
+        keep_audio_->setEnabled(idle);
+        // Deleting while the worker holds the directory open would race it.
+        delete_button_->setEnabled(idle);
 
         const bool has_text = !transcript_->toPlainText().trimmed().isEmpty();
         save_button_->setEnabled(state == UiState::Completed || (state == UiState::Error && has_text));
@@ -385,10 +420,7 @@ private:
         }
 
         transcript_path_ = parts.mid(2).join('|');
-        completed_ = true;
-        apply_state(UiState::Completed);
-        set_status("Transcription complete");
-        process_->write("q\n");
+        storage_label_->setText("Saved to: " + transcript_path_);
     }
 
     // Worker reports arrive as SEVERITY|CATEGORY|message.
@@ -486,6 +518,55 @@ private:
         }
     }
 
+    void show_privacy_notice() {
+        QMessageBox::information(this, "Privacy",
+            "Audio is captured, analysed and transcribed entirely on this computer.\n\n"
+            "Whisper runs locally against a model file on disk. No audio, transcript or "
+            "metadata is uploaded, and neither this window nor the worker it runs opens a "
+            "network connection.\n\n"
+            "Saved to:\n" + (data_directory_.isEmpty() ? QString("(shown once a recording starts)")
+                                                       : data_directory_) + "\n\n"
+            "Files are created readable only by you. Nothing is written to a log file.\n\n"
+            "Turn off \"Keep audio files\" to transcribe without keeping any WAV file. "
+            "\"Delete recordings\" removes every stored recording and transcript.");
+    }
+
+    void delete_recordings() {
+        const auto choice = QMessageBox::question(this, "Delete recordings",
+            "Delete every stored recording and transcript?\n\nThis cannot be undone.",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes) {
+            return;
+        }
+
+        QProcess cleaner;
+        cleaner.start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
+                      {"--delete-recordings"});
+        if (!cleaner.waitForFinished(10000)) {
+            cleaner.kill();
+            cleaner.waitForFinished(1000);
+            QMessageBox::warning(this, "Delete recordings", "The deletion did not finish.");
+            return;
+        }
+
+        const QStringList lines = QString::fromUtf8(cleaner.readAllStandardOutput()).split('\n');
+        for (const QString& line : lines) {
+            if (!line.startsWith("DELETED|")) {
+                continue;
+            }
+            const QStringList parts = line.split('|');
+            if (parts.size() >= 3) {
+                QMessageBox::information(this, "Delete recordings",
+                    QString("Deleted %1 file(s), %2 MB.")
+                        .arg(parts.at(1))
+                        .arg(QString::number(parts.at(2).toDouble() / (1024.0 * 1024.0), 'f', 1)));
+                transcript_path_.clear();
+                return;
+            }
+        }
+        QMessageBox::warning(this, "Delete recordings", "Nothing was reported as deleted.");
+    }
+
     void save_transcript() {
         const QString suggested = transcript_path_.isEmpty() ? QString("transcription.txt") : transcript_path_;
         const QString path = QFileDialog::getSaveFileName(this, "Save a copy of the transcription", suggested);
@@ -565,6 +646,11 @@ private:
     QLabel* input_label_;
     QLabel* latency_label_;
     QProgressBar* progress_;
+    QLabel* storage_label_;
+    QCheckBox* keep_audio_;
+    QPushButton* privacy_button_;
+    QPushButton* delete_button_;
+    QString data_directory_;
     QPlainTextEdit* transcript_;
     QProcess* process_;
     QTimer* timer_;

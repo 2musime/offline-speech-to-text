@@ -671,6 +671,75 @@ void report_model(const ModelMetadata& metadata) {
               << metadata.mel_bands << " mel bands" << std::endl;
 }
 
+void print_privacy_notice(const fs::path& data_directory) {
+    std::cout <<
+        "Privacy\n"
+        "  Audio is captured, analysed and transcribed entirely on this computer.\n"
+        "  Whisper runs locally against a model file on disk. No audio, transcript\n"
+        "  or metadata is uploaded, and this program opens no network connections.\n"
+        "\n"
+        "  Written to " << data_directory.string() << "\n"
+        "    recordings/    WAV audio, owner-readable only\n"
+        "    transcripts/   transcription text, owner-readable only\n"
+        "\n"
+        "  Nothing is written to a log file. Transcribed text is printed to standard\n"
+        "  output so the graphical interface can display it; redirecting that output\n"
+        "  to a file is the one way this program's text can end up somewhere else.\n"
+        "\n"
+        "  --no-retain-audio       transcribe without keeping any WAV file\n"
+        "  --no-retain-transcript  display the transcription without saving it\n"
+        "  --delete-recordings     delete every stored recording and transcript\n"
+        << std::endl;
+}
+
+// Removes stored audio and transcripts. Confined to the data directory, regular
+// files only, and never follows a link out of it.
+bool delete_stored_files(
+    const fs::path& data_directory,
+    const std::vector<fs::path>& directories) {
+    std::size_t removed = 0;
+    std::uintmax_t bytes = 0;
+
+    for (const fs::path& directory : directories) {
+        std::error_code error;
+        if (!fs::is_directory(directory, error) || error) {
+            continue;
+        }
+        for (const fs::directory_entry& entry : fs::directory_iterator(directory, error)) {
+            std::error_code entry_error;
+            if (fs::is_symlink(entry.symlink_status(entry_error))) {
+                report_warning(ErrorCategory::FileSaving,
+                    "Skipping a symbolic link rather than deleting through it: " + entry.path().string());
+                continue;
+            }
+            if (!fs::is_regular_file(entry.status(entry_error)) || entry_error) {
+                continue;
+            }
+            if (!path_is_within(entry.path(), data_directory)) {
+                continue;
+            }
+
+            const std::uintmax_t size = fs::file_size(entry.path(), entry_error);
+            std::error_code remove_error;
+            if (fs::remove(entry.path(), remove_error)) {
+                ++removed;
+                if (!entry_error) {
+                    bytes += size;
+                }
+            } else {
+                report_error(ErrorCategory::FileSaving,
+                    "Could not delete " + entry.path().string() + ".");
+                return false;
+            }
+        }
+    }
+
+    std::cout << "DELETED|" << removed << '|' << bytes << std::endl;
+    std::cout << "Deleted " << removed << " file(s), "
+              << bytes / (1024.0 * 1024.0) << " MB." << std::endl;
+    return true;
+}
+
 // Structured lines are newline-delimited, so text fields must not carry one.
 std::string as_single_line(const std::string& text) {
     std::string flattened;
@@ -1202,10 +1271,21 @@ bool transcribe(
     const std::vector<SpeechSegment>& segments,
     int thread_count,
     TranscriptionWorkspace& workspace,
-    const fs::path& output_path) {
+    const fs::path& output_path,
+    bool retain_transcript) {
     TranscriptionResult result;
     if (!run_transcription(context, samples, segments, thread_count, workspace, result)) {
         return false;
+    }
+
+    // FINAL is emitted whether or not the text is kept, so a caller watching for
+    // completion does not depend on retention being switched on.
+    std::cout << "FINAL|" << as_single_line(result.text) << std::endl;
+
+    if (!retain_transcript) {
+        std::cout << "Transcript not saved (--no-retain-transcript)." << std::endl;
+        std::cout << "Whisper processing time: " << result.milliseconds << " ms" << std::endl;
+        return true;
     }
 
     const std::string text = result.text + "\n";
@@ -1216,7 +1296,6 @@ bool transcribe(
         return false;
     }
 
-    std::cout << "FINAL|" << as_single_line(result.text) << std::endl;
     report_saved("TRANSCRIPT", output_path);
     std::cout << "Whisper processing time: " << result.milliseconds << " ms" << std::endl;
     return true;
@@ -1531,7 +1610,11 @@ bool parse_options(
     bool& list_devices,
     bool& benchmark_mode,
     std::string& input_path,
-    bool& threads_explicit) {
+    bool& threads_explicit,
+    bool& retain_audio,
+    bool& retain_transcript,
+    bool& delete_recordings,
+    bool& show_privacy) {
     thread_count = default_thread_count();
     compare_mode = false;
     streaming_mode = false;
@@ -1543,6 +1626,10 @@ bool parse_options(
     benchmark_mode = false;
     input_path.clear();
     threads_explicit = false;
+    retain_audio = true;
+    retain_transcript = true;
+    delete_recordings = false;
+    show_privacy = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -1584,6 +1671,14 @@ bool parse_options(
                 return false;
             }
             input_path = argv[++i];
+        } else if (argument == "--no-retain-audio") {
+            retain_audio = false;
+        } else if (argument == "--no-retain-transcript") {
+            retain_transcript = false;
+        } else if (argument == "--delete-recordings") {
+            delete_recordings = true;
+        } else if (argument == "--privacy") {
+            show_privacy = true;
         } else if (argument == "--list-devices") {
             list_devices = true;
         } else if (argument == "--model-dir") {
@@ -1616,7 +1711,10 @@ bool parse_options(
                       << "  ./build-release/audio_to_text_cli MODEL_PATH [--threads N]\n"
                       << "      [--duration 15|45|60] [--stream] [--model-dir DIR]\n"
                       << "      [--device INDEX]\n"
+                      << "      [--no-retain-audio] [--no-retain-transcript]\n"
                       << "  ./build-release/audio_to_text_cli --list-devices\n"
+                      << "  ./build-release/audio_to_text_cli --privacy\n"
+                      << "  ./build-release/audio_to_text_cli --delete-recordings\n"
                       << "  ./build-release/audio_to_text_cli --benchmark --input SPEECH.wav\n"
                       << "      MODEL_PATH ... [--threads N]\n"
                       << "  ./build-release/audio_to_text_cli --compare MODEL_PATH MODEL_PATH ...\n"
@@ -1634,7 +1732,7 @@ bool parse_options(
         }
     }
 
-    if (list_devices) {
+    if (list_devices || delete_recordings || show_privacy) {
         return true;
     }
     if (benchmark_mode) {
@@ -1715,9 +1813,14 @@ int run(int argc, char** argv) {
     bool benchmark_mode = false;
     std::string input_path;
     bool threads_explicit = false;
+    bool retain_audio = true;
+    bool retain_transcript = true;
+    bool delete_recordings = false;
+    bool show_privacy = false;
     if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, duration_seconds,
                        model_paths, model_directories, device_index, list_devices,
-                       benchmark_mode, input_path, threads_explicit)) {
+                       benchmark_mode, input_path, threads_explicit,
+                       retain_audio, retain_transcript, delete_recordings, show_privacy)) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
@@ -1744,7 +1847,19 @@ int run(int argc, char** argv) {
             "Could not create the application data directory: " + data_directory.string());
         return 1;
     }
+    std::cout << "DATADIR|" << data_directory.string() << std::endl;
     std::cout << "Data directory: " << data_directory.string() << std::endl;
+
+    if (show_privacy) {
+        print_privacy_notice(data_directory);
+        return 0;
+    }
+    if (delete_recordings) {
+        return delete_stored_files(data_directory, {recordings_directory, transcripts_directory}) ? 0 : 1;
+    }
+    if (!retain_audio) {
+        std::cout << "Audio retention is off; no WAV file will be kept." << std::endl;
+    }
 
     std::vector<fs::path> model_roots{
         fs::current_path() / "models",
@@ -1933,19 +2048,20 @@ int run(int argc, char** argv) {
             break;
         }
 
-        if (!write_wav(recording_path, recorded_samples, sample_rate)) {
-            report_error(ErrorCategory::FileSaving, "Could not save " + recording_path.string() + ".");
-            break;
+        if (retain_audio) {
+            if (!write_wav(recording_path, recorded_samples, sample_rate)) {
+                report_error(ErrorCategory::FileSaving, "Could not save " + recording_path.string() + ".");
+                break;
+            }
+            report_saved("RECORDING", recording_path);
         }
-
-        report_saved("RECORDING", recording_path);
         std::cout << "Recorded "
                   << recorded_samples.size() / static_cast<double>(sample_rate)
                   << " seconds." << std::endl;
 
         const NoiseProfile noise_profile = measure_noise_floor(recorded_samples, sample_rate);
         const std::vector<std::int16_t> cleaned_samples = reduce_noise(recorded_samples, noise_profile);
-        if (!write_wav(cleaned_path, cleaned_samples, sample_rate)) {
+        if (retain_audio && !write_wav(cleaned_path, cleaned_samples, sample_rate)) {
             report_error(ErrorCategory::FileSaving, "Could not save " + cleaned_path.string() + ".");
             break;
         }
@@ -1956,7 +2072,9 @@ int run(int argc, char** argv) {
         std::cout << "Measured noise floor: " << noise_profile.noise_rms
                   << " RMS (" << noise_db << " dBFS), attenuation threshold: "
                   << noise_profile.attenuation_threshold << std::endl;
-        report_saved("CLEANED", cleaned_path);
+        if (retain_audio) {
+            report_saved("CLEANED", cleaned_path);
+        }
 
         const auto vad_start = std::chrono::steady_clock::now();
         const std::vector<SpeechSegment> speech_segments = detect_speech_segments(recorded_samples, sample_rate);
@@ -1970,7 +2088,7 @@ int run(int argc, char** argv) {
 
         const std::vector<std::int16_t> speech = extract_speech(recorded_samples, speech_segments);
         const std::vector<std::int16_t> cleaned_speech = extract_speech(cleaned_samples, speech_segments);
-        if (!write_wav(speech_path, speech, sample_rate)) {
+        if (retain_audio && !write_wav(speech_path, speech, sample_rate)) {
             report_error(ErrorCategory::FileSaving, "Could not save " + speech_path.string() + ".");
             break;
         }
@@ -1980,7 +2098,9 @@ int run(int argc, char** argv) {
         const double reduction = raw_seconds > 0.0 ? (1.0 - speech_seconds / raw_seconds) * 100.0 : 0.0;
         std::cout << "Speech detected: " << speech_seconds << " seconds in "
                   << speech_segments.size() << " segment(s)." << std::endl;
-        report_saved("SPEECH", speech_path);
+        if (retain_audio) {
+            report_saved("SPEECH", speech_path);
+        }
         std::cout << "Removed " << reduction << "% of recorded audio."
                   << " VAD time: " << vad_ms << " ms" << std::endl;
 
@@ -1990,7 +2110,8 @@ int run(int argc, char** argv) {
             }
         } else if (context) {
             const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
-            if (!transcribe(context.get(), speech, speech_range, thread_count, workspace, transcript_path)) {
+            if (!transcribe(context.get(), speech, speech_range, thread_count, workspace,
+                            transcript_path, retain_transcript)) {
                 break;
             }
         }
