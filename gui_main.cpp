@@ -1,4 +1,5 @@
 #include "partial_text.h"
+#include "transcript_library.h"
 #include "ui_state.h"
 #include "version.h"
 
@@ -26,7 +27,9 @@
 #include <QTimer>
 #include <QTime>
 #include <QTextCursor>
+#include <QListWidget>
 #include <QShortcut>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QVBoxLayout>
 
@@ -135,7 +138,9 @@ public:
 
         // ---- Transcript: the output, and the actions that apply to it.
         auto* transcript_header = new QHBoxLayout();
-        transcript_header->addWidget(new QLabel("Transcript", central));
+        transcript_title_ = new QLabel("Transcript", central);
+        transcript_title_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+        transcript_header->addWidget(transcript_title_);
         transcript_header->addStretch();
         save_button_ = new QPushButton("Save", central);
         copy_button_ = new QPushButton("Copy", central);
@@ -156,7 +161,31 @@ public:
         transcript_->setAccessibleName("Transcript");
         transcript_->setAccessibleDescription("The text transcribed from your recording");
         layout->addWidget(transcript_, 1);
-        setCentralWidget(central);
+        history_list_ = new QListWidget(this);
+        history_list_->setAlternatingRowColors(true);
+        history_list_->setContextMenuPolicy(Qt::CustomContextMenu);
+        history_list_->setAccessibleName("Saved transcripts");
+        history_list_->setMinimumWidth(220);
+        history_list_->setUniformItemSizes(false);
+        // Elide rather than scroll sideways: a horizontal scrollbar in a list
+        // of previews is a worse way to read them than a trimmed line.
+        history_list_->setTextElideMode(Qt::ElideRight);
+        history_list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+        auto* history_panel = new QWidget(this);
+        auto* history_layout = new QVBoxLayout(history_panel);
+        history_layout->setContentsMargins(0, 0, 0, 0);
+        history_layout->addWidget(new QLabel("Saved transcripts", history_panel));
+        history_layout->addWidget(history_list_, 1);
+
+        splitter_ = new QSplitter(Qt::Horizontal, this);
+        splitter_->addWidget(history_panel);
+        splitter_->addWidget(central);
+        splitter_->setStretchFactor(0, 0);
+        splitter_->setStretchFactor(1, 1);
+        splitter_->setSizes({260, 700});
+        history_panel->hide();
+        setCentralWidget(splitter_);
 
         // ---- Status bar: context that used to be four stacked labels.
         context_label_ = new QLabel(this);
@@ -179,6 +208,13 @@ public:
         processing_timer_->setInterval(1000);
 
         populate_devices();
+        // Resolved here rather than waiting for the worker, so saved
+        // transcripts can be read before anything has been recorded.
+        data_directory_ = QString::fromStdString(application_data_directory().string());
+        connect(history_list_, &QListWidget::currentRowChanged, this,
+                [this](int row) { show_history_entry(row); });
+        connect(history_list_, &QListWidget::customContextMenuRequested, this,
+                [this](const QPoint& at) { show_history_menu(at); });
         connect(duration_selector_, qOverload<int>(&QComboBox::currentIndexChanged), this,
                 [this](int) { refresh_clock(0); });
         refresh_clock(0);
@@ -226,6 +262,8 @@ private:
             return;
         }
 
+        return_to_live();
+        live_transcript_.clear();
         transcript_->clear();
         final_transcription_.clear();
         transcript_path_.clear();
@@ -473,6 +511,12 @@ private:
         cancel_action_ = recording_menu->addAction("&Cancel", this, [this] { cancel_work(); });
         cancel_action_->setShortcut(QKeySequence(Qt::Key_Escape));
 
+        QMenu* view_menu = menuBar()->addMenu("&View");
+        history_action_ = view_menu->addAction("Saved &Transcripts", this,
+                                               [this] { toggle_history(); });
+        history_action_->setCheckable(true);
+        history_action_->setShortcut(QKeySequence("Ctrl+H"));
+
         QMenu* help_menu = menuBar()->addMenu("&Help");
         help_menu->addAction("&Privacy", this, [this] { show_privacy_notice(); });
         help_menu->addAction("&About", this, [this] { show_about(); });
@@ -521,6 +565,17 @@ private:
         record_action_->setEnabled(controls.start || controls.stop);
         record_action_->setText(controls.stop ? "&Stop Recording" : "&Start Recording");
         cancel_action_->setEnabled(controls.cancel);
+
+        history_list_->setEnabled(controls.history);
+        history_action_->setEnabled(controls.history);
+        // Save and copy apply to whatever is on screen, including a saved
+        // transcript being viewed.
+        if (viewing_history_) {
+            save_button_->setEnabled(true);
+            copy_button_->setEnabled(true);
+            save_action_->setEnabled(true);
+            copy_action_->setEnabled(true);
+        }
 
         apply_indicator(state);
         explain_disabled_controls(state, controls);
@@ -608,6 +663,148 @@ private:
         copy_button_->setToolTip(controls.copy ? "Copy the transcript (Ctrl+Shift+C)" : nothing_yet);
     }
 
+    // ------------------------------------------------------------- history
+
+    void toggle_history() {
+        const bool showing = !splitter_->widget(0)->isVisible();
+        splitter_->widget(0)->setVisible(showing);
+        history_action_->setChecked(showing);
+        if (showing) {
+            // Sizes set while the pane was hidden do not survive showing it, so
+            // the panel would open at zero width.
+            const int panel = qMax(260, width() / 4);
+            splitter_->setSizes({panel, qMax(320, width() - panel)});
+            refresh_history();
+            history_list_->setFocus();
+        }
+    }
+
+    // Rebuilt from disk rather than tracked incrementally: the list is short,
+    // and a stale list is worse than a cheap re-read.
+    void refresh_history() {
+        const int previous_row = history_list_->currentRow();
+        const QSignalBlocker blocker(history_list_);
+        history_list_->clear();
+        entries_ = list_transcripts(fs::path(data_directory_.toStdString()));
+
+        if (entries_.empty()) {
+            auto* empty = new QListWidgetItem("No saved transcripts yet", history_list_);
+            empty->setFlags(Qt::NoItemFlags);
+            return;
+        }
+
+        for (const TranscriptEntry& entry : entries_) {
+            char when[64];
+            std::tm shown = entry.stamp.when;
+            std::strftime(when, sizeof(when), "%d %b %Y, %H:%M", &shown);
+            QString preview = entry.preview.empty()
+                ? QString("(no text)")
+                : QString::fromStdString(entry.preview);
+            // The row is a label, not the transcript: keep it to one glance.
+            if (preview.size() > 48) {
+                preview = preview.left(48).trimmed() + "...";
+            }
+            auto* item = new QListWidgetItem(
+                QString("%1\n%2").arg(QString::fromUtf8(when), preview), history_list_);
+            item->setToolTip(QString::fromStdString(entry.path.string()));
+        }
+        if (previous_row >= 0 && previous_row < history_list_->count()) {
+            history_list_->setCurrentRow(previous_row);
+        }
+    }
+
+    void show_history_entry(int row) {
+        if (row < 0 || row >= static_cast<int>(entries_.size())) {
+            return;
+        }
+        const TranscriptEntry& entry = entries_[static_cast<std::size_t>(row)];
+
+        std::string text;
+        std::string reason;
+        if (!read_transcript(entry.path, fs::path(data_directory_.toStdString()), text, reason)) {
+            QMessageBox::warning(this, "Could not open transcript",
+                                 QString::fromStdString(reason));
+            return;
+        }
+
+        // Remember the live text once, so returning to it does not lose work.
+        if (!viewing_history_) {
+            live_transcript_ = transcript_->toPlainText();
+        }
+        viewing_history_ = true;
+        transcript_->setPlainText(QString::fromStdString(text));
+        transcript_->moveCursor(QTextCursor::Start);
+
+        char when[64];
+        std::tm shown = entry.stamp.when;
+        std::strftime(when, sizeof(when), "%d %b %Y at %H:%M", &shown);
+        const CompanionAudio audio =
+            companion_audio(entry.stamp, fs::path(data_directory_.toStdString()));
+        transcript_title_->setText(QString("Saved transcript — %1%2")
+            .arg(QString::fromUtf8(when), audio.any() ? "" : "  (audio deleted)"));
+        set_status(QString("Viewing a saved transcript. Press Start Recording to return to live."));
+        // A saved transcript is still a transcript: it can be copied and saved.
+        save_button_->setEnabled(true);
+        copy_button_->setEnabled(true);
+        save_action_->setEnabled(true);
+        copy_action_->setEnabled(true);
+    }
+
+    // Live output owns the pane again.
+    void return_to_live() {
+        if (!viewing_history_) {
+            return;
+        }
+        viewing_history_ = false;
+        const QSignalBlocker blocker(history_list_);
+        history_list_->setCurrentRow(-1);
+        transcript_->setPlainText(live_transcript_);
+        transcript_title_->setText("Transcript");
+    }
+
+    void show_history_menu(const QPoint& at) {
+        const int row = history_list_->currentRow();
+        if (row < 0 || row >= static_cast<int>(entries_.size())) {
+            return;
+        }
+        const TranscriptEntry entry = entries_[static_cast<std::size_t>(row)];
+        const fs::path root(data_directory_.toStdString());
+        const CompanionAudio audio = companion_audio(entry.stamp, root);
+
+        QMenu menu(this);
+        menu.addAction("&Copy", this, [this] { copy_transcript(); });
+        menu.addAction("&Save a Copy...", this, [this] { save_transcript(); });
+        menu.addSeparator();
+
+        QStringList kept;
+        if (audio.has_recording) { kept << "original"; }
+        if (audio.has_cleaned) { kept << "cleaned"; }
+        if (audio.has_speech) { kept << "speech only"; }
+        QAction* audio_note = menu.addAction(kept.isEmpty()
+            ? QString("Audio: not kept")
+            : QString("Audio: %1").arg(kept.join(", ")));
+        audio_note->setEnabled(false);
+
+        menu.addSeparator();
+        menu.addAction("&Delete This Transcript...", this, [this, entry, root] {
+            const auto choice = QMessageBox::question(this, "Delete transcript",
+                "Delete this transcript?\n\n" + QString::fromStdString(entry.path.filename().string()) +
+                "\n\nThe recording it came from is not deleted. This cannot be undone.",
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (choice != QMessageBox::Yes) {
+                return;
+            }
+            std::string reason;
+            if (!delete_transcript(entry.path, root, reason)) {
+                QMessageBox::warning(this, "Could not delete", QString::fromStdString(reason));
+                return;
+            }
+            return_to_live();
+            refresh_history();
+        });
+        menu.exec(history_list_->mapToGlobal(at));
+    }
+
     void refresh_clock(qint64 seconds) {
         const int limit = limit_seconds_ > 0 ? limit_seconds_
                                              : duration_selector_->currentData().toInt();
@@ -691,6 +888,9 @@ private:
         transcript_path_ = parts.mid(2).join('|');
         storage_summary_ = transcript_path_;
         update_context_bar();
+        if (splitter_->widget(0)->isVisible()) {
+            refresh_history();
+        }
     }
 
     // Worker reports arrive as SEVERITY|CATEGORY|message.
@@ -846,6 +1046,8 @@ private:
                         .arg(parts.at(1))
                         .arg(QString::number(parts.at(2).toDouble() / (1024.0 * 1024.0), 'f', 1)));
                 transcript_path_.clear();
+                return_to_live();
+                refresh_history();
                 return;
             }
         }
@@ -927,6 +1129,13 @@ private:
     QLabel* duration_label_;
     QLabel* latency_label_;
     QLabel* indicator_;
+    QLabel* transcript_title_;
+    QListWidget* history_list_;
+    QSplitter* splitter_;
+    QAction* history_action_;
+    std::vector<TranscriptEntry> entries_;
+    QString live_transcript_;
+    bool viewing_history_ = false;
     QLabel* context_label_;
     QString model_summary_;
     QString input_summary_;

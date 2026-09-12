@@ -41,6 +41,43 @@ of failures. They are now one line, showing only what is actually known.
 The progress bar is hidden unless something is running: an empty bar on an idle
 window suggests stalled work.
 
+## Saved transcripts
+
+`View > Saved Transcripts`, or `Ctrl+H`, opens a panel on the left listing every
+transcript the application has written, newest first, each row showing when it
+was recorded and the opening words.
+
+Selecting a row loads that transcript into the pane, read-only. The header above
+the pane changes from `Transcript` to `Saved transcript — 12 Sep 2026 at 22:37`,
+so live output and stored output are never mistaken for one another. If the
+audio it came from has since been deleted, the header says so.
+
+Pressing Start Recording while a saved transcript is open returns the pane to
+live output first. Whatever live text was on screen when you started browsing is
+put back, so opening the history never costs you the transcription in progress.
+
+**Browsing is unavailable while a recording or transcription is running.** The
+pane shows live output during those phases, and swapping it for a stored
+transcript would hide the thing being watched. The list greys out until the
+worker finishes.
+
+Right-clicking a row offers:
+
+- **Copy** and **Save a Copy** — the same actions as for a live transcript
+- **Audio:** a line naming which recordings survive for that session, or
+  `not kept` when retention was off or they have been deleted
+- **Delete This Transcript** — removes that one file after confirming. The
+  recording it came from is left alone; `File > Delete All Recordings` is still
+  the way to remove everything.
+
+The list refreshes when a new transcript is saved and after deleting everything.
+With nothing stored it reads `No saved transcripts yet` rather than showing an
+empty box.
+
+Reading is confined the same way writing is: a path that resolves outside the
+application's own directory, or that is a symbolic link, is refused rather than
+followed. See [FILE_STORAGE.md](FILE_STORAGE.md).
+
 ## Keyboard
 
 Every shortcut appears next to its menu entry, so it can be found rather than
@@ -52,6 +89,8 @@ memorised.
 | `Esc` | Cancel whatever the worker is doing |
 | `Ctrl+S` | Save the transcript to a file |
 | `Ctrl+Shift+C` | Copy the whole transcript |
+| `Ctrl+H` | Show or hide the saved transcripts panel |
+| `Up` / `Down` | Move through the saved transcripts |
 | `Ctrl+Q` | Quit |
 
 `Ctrl+R` is one action rather than two, so the same key both starts and stops.

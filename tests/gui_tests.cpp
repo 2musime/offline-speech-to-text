@@ -96,6 +96,7 @@ void test_state_transitions() {
 
     const ControlStates ready = controls_for(UiState::Ready, true, false);
     CHECK("start is offered when ready", ready.start);
+    CHECK("saved transcripts can be browsed when ready", ready.history);
     CHECK_FALSE("stop is not offered when ready", ready.stop);
     CHECK("settings are editable when ready", ready.model && ready.duration && ready.device);
     CHECK_FALSE("nothing is saveable before a transcription", ready.save || ready.copy);
@@ -113,6 +114,9 @@ void test_state_transitions() {
     CHECK_FALSE("the microphone cannot change mid-recording", recording.device);
     CHECK_FALSE("retention cannot change mid-recording", recording.keep_audio);
     CHECK_FALSE("deletion cannot race the worker", recording.delete_recordings);
+    // The transcript pane shows live output while recording; swapping it for a
+    // saved transcript would hide the thing being watched.
+    CHECK_FALSE("history cannot be browsed while recording", recording.history);
     CHECK_FALSE("progress is measured while recording", recording.progress_indeterminate);
 
     const ControlStates stopping = controls_for(UiState::Stopping, true, false);
@@ -126,6 +130,7 @@ void test_state_transitions() {
     // A ten minute recording takes minutes to transcribe; the user must be able
     // to abandon it, and must see real progress rather than a spinning bar.
     CHECK("a long transcription can be cancelled", processing.cancel);
+    CHECK_FALSE("history cannot be browsed while transcribing", processing.history);
     CHECK_FALSE("progress is measured while transcribing", processing.progress_indeterminate);
 
     const ControlStates completed = controls_for(UiState::Completed, true, true);
@@ -133,6 +138,7 @@ void test_state_transitions() {
     CHECK("the transcript is saveable", completed.save && completed.copy);
     CHECK("settings are editable again", completed.model && completed.duration);
     CHECK("deletion is available again", completed.delete_recordings);
+    CHECK("history can be browsed once finished", completed.history);
 
     // After a failure, whatever text arrived stays saveable; nothing does not.
     const ControlStates failed_with_text = controls_for(UiState::Error, true, true);
@@ -140,6 +146,7 @@ void test_state_transitions() {
     const ControlStates failed_empty = controls_for(UiState::Error, true, false);
     CHECK_FALSE("a failure with no text offers nothing to save", failed_empty.save);
     CHECK("recovery from an error is possible", failed_empty.start);
+    CHECK("history can be browsed after a failure", failed_empty.history);
 
     // The microphone list is only offered once enumeration has answered.
     CHECK_FALSE("the microphone list waits for enumeration",
@@ -162,6 +169,13 @@ void test_state_transitions() {
                         "every busy state offers a way out", ui_state_name(state));
         harness::record(ui_state_is_busy(state) || !controls.cancel,
                         "cancel is offered only while busy", ui_state_name(state));
+        // Browsing and recording are mutually exclusive by decision: the pane
+        // cannot show live output and a saved transcript at once.
+        harness::record(!(controls.history && ui_state_is_busy(state)),
+                        "history and busy work never overlap", ui_state_name(state));
+        harness::record(controls.history == controls.start,
+                        "history follows the same idleness as starting",
+                        ui_state_name(state));
     }
 }
 
