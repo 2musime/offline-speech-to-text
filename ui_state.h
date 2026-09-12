@@ -27,6 +27,10 @@ struct ControlStates {
     bool delete_recordings = false;
     bool save = false;
     bool copy = false;
+    // Browsing saved transcripts. Disabled while a recording is in progress:
+    // the transcript pane shows live output, and swapping it mid-recording
+    // would hide the thing the user is watching.
+    bool history = false;
     bool progress_indeterminate = false;
 };
 
@@ -75,6 +79,7 @@ inline ControlStates controls_for(UiState state, bool devices_ready, bool has_te
     controls.keep_audio = idle;
     // Deleting while the worker holds the directory open would race it.
     controls.delete_recordings = idle;
+    controls.history = idle;
     controls.save = state == UiState::Completed || (state == UiState::Error && has_text);
     controls.copy = controls.save;
     // Processing is deliberately absent: the worker reports how many chunks it

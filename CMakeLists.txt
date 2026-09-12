@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(AudioToText
-    VERSION 1.0.0
+    VERSION 1.0.1
     DESCRIPTION "Offline speech to text"
     HOMEPAGE_URL "https://github.com/2musime/offline-speech-to-text"
     LANGUAGES CXX)
@@ -78,6 +78,7 @@ add_executable(audio_to_text
 )
 
 target_include_directories(audio_to_text PRIVATE
+    .
     "${CMAKE_BINARY_DIR}/generated"
 )
 
