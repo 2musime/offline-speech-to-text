@@ -391,6 +391,52 @@ void test_ring_buffer_overflow() {
     CHECK("samples arrive in order and uncorrupted", ordered);
 }
 
+// The condition that hung the application: once the recording reached its
+// duration limit, the drain stopped consuming, the ring buffer never emptied,
+// and the streaming worker's loop waited on it forever.
+void test_drain_past_the_limit() {
+    harness::begin("Draining past the duration limit");
+
+    constexpr std::size_t capacity = 8192;
+    constexpr std::size_t limit = 1000;
+    AudioCapture capture(capacity);
+
+    std::vector<std::int16_t> block(4000);
+    for (std::size_t i = 0; i < block.size(); ++i) {
+        block[i] = static_cast<std::int16_t>(i & 0x7fff);
+    }
+    CHECK_EQ("audio is buffered", capture.buffer.write(block.data(), block.size()),
+             block.size());
+
+    std::vector<std::int16_t> samples;
+    samples.reserve(limit);
+    std::vector<std::int16_t> scratch;
+    const std::size_t kept = drain_capture(capture, samples, scratch, limit);
+
+    CHECK_EQ("only the limit is kept", samples.size(), limit);
+    CHECK_EQ("the report counts what was kept", kept, limit);
+    // The regression assertion: leaving anything behind is what caused the hang.
+    CHECK_EQ("the buffer is emptied even past the limit", capture.buffer.available(),
+             std::size_t{0});
+    CHECK_EQ("the excess is counted as dropped",
+             capture.dropped_frames.load(), block.size() - limit);
+
+    // Draining again must be harmless and must still leave the buffer empty.
+    const std::size_t again = drain_capture(capture, samples, scratch, limit);
+    CHECK_EQ("a second drain keeps nothing", again, std::size_t{0});
+    CHECK_EQ("the buffer stays empty", capture.buffer.available(), std::size_t{0});
+
+    // A writer that keeps going after the limit must not refill it forever.
+    capture.buffer.write(block.data(), block.size());
+    drain_capture(capture, samples, scratch, limit);
+    CHECK_EQ("later audio is consumed and discarded", capture.buffer.available(),
+             std::size_t{0});
+    CHECK_EQ("samples never exceed the limit", samples.size(), limit);
+
+    capture.reset();
+    CHECK_EQ("reset clears the dropped count", capture.dropped_frames.load(), std::size_t{0});
+}
+
 // ------------------------------------------------------------ file storage
 
 void test_file_write_failures() {
@@ -463,6 +509,7 @@ int main() {
     test_overlapping_segments();
     test_model_paths();
     test_ring_buffer_overflow();
+    test_drain_past_the_limit();
     test_file_write_failures();
     return harness::summary();
 }

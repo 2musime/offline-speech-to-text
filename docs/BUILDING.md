@@ -56,8 +56,8 @@ Run the CLI worker directly:
 ./build-release/audio_to_text_cli models/ggml-small.en.bin --threads 4
 ```
 
-Recordings are limited to 15 seconds by default. Choose a supported limit with
-`--duration 15`, `--duration 45`, or `--duration 60`:
+Recordings are limited to 15 seconds by default. Supported limits are 15, 45
+and 60 seconds, and 300 or 600 seconds for dictation:
 
 ```bash
 ./build-release/audio_to_text_cli models/ggml-small.en.bin \
