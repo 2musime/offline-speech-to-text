@@ -4,6 +4,7 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFile>
 #include <QGroupBox>
@@ -13,11 +14,23 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QTimer>
 #include <QTime>
 #include <QTextCursor>
 #include <QVBoxLayout>
+
+// Every control's enabled state is a function of this, and of nothing else.
+enum class UiState {
+    Ready,
+    LoadingModel,
+    Recording,
+    Stopping,
+    Processing,
+    Completed,
+    Error
+};
 
 class AudioToTextWindow final : public QMainWindow {
 public:
@@ -61,11 +74,16 @@ public:
         model_label_ = new QLabel("Model: not loaded", central);
         input_label_ = new QLabel("Input: not selected", central);
         latency_label_ = new QLabel("", central);
+        progress_ = new QProgressBar(central);
+        progress_->setTextVisible(false);
+        progress_->setRange(0, 100);
+        progress_->setValue(0);
         layout->addWidget(status_label_);
         layout->addWidget(duration_label_);
         layout->addWidget(model_label_);
         layout->addWidget(input_label_);
         layout->addWidget(latency_label_);
+        layout->addWidget(progress_);
 
         transcript_ = new QPlainTextEdit(central);
         transcript_->setPlaceholderText("Transcription will appear here...");
@@ -103,22 +121,29 @@ public:
             if (closing_ || error == QProcess::Crashed) {
                 return;
             }
-            set_idle("Audio worker problem: " + process_->errorString());
+            set_failed("Audio worker problem: " + process_->errorString());
         });
         connect(process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
                 this, [this](int exit_code, QProcess::ExitStatus status) { handle_worker_exit(exit_code, status); });
-        connect(timer_, &QTimer::timeout, this, [this] {
-            const int seconds = started_at_.secsTo(QTime::currentTime());
-            duration_label_->setText("Duration: " + QTime(0, 0).addSecs(seconds).toString("mm:ss"));
-        });
+        connect(timer_, &QTimer::timeout, this, [this] { refresh_elapsed(); });
         connect(limit_timer_, &QTimer::timeout, this, [this] {
-            set_status("Recording limit reached; stopping recording...");
+            if (state_ != UiState::Recording) {
+                return;
+            }
+            set_status("Recording limit reached; finishing...");
             stop_recording();
         });
+
+        apply_state(UiState::Ready);
     }
 
 private:
     void start_recording() {
+        // Only these states may begin a recording, so a second click, a stray
+        // shortcut, or a timer cannot start a concurrent worker.
+        if (state_ != UiState::Ready && state_ != UiState::Completed && state_ != UiState::Error) {
+            return;
+        }
         if (process_->state() != QProcess::NotRunning) {
             return;
         }
@@ -141,29 +166,40 @@ private:
         if (device >= 0) {
             arguments << "--device" << QString::number(device);
         }
+        limit_seconds_ = duration_selector_->currentData().toInt();
+        // No waitForStarted: blocking here would freeze the window. The state
+        // stays LoadingModel until the worker says it is ready.
         process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", arguments);
-        if (!process_->waitForStarted(1000)) {
-            set_idle("Could not start the audio worker.");
+        apply_state(UiState::LoadingModel);
+        set_status("Loading model...");
+    }
+
+    // The worker has validated the model, opened the device, and is waiting.
+    // Recording, and the clock, start here rather than at the button press.
+    void begin_recording() {
+        if (state_ != UiState::LoadingModel) {
             return;
         }
         process_->write("\n");
-        start_button_->setEnabled(false);
-        stop_button_->setEnabled(true);
-        model_selector_->setEnabled(false);
-        duration_selector_->setEnabled(false);
-        device_selector_->setEnabled(false);
-        started_at_ = QTime::currentTime();
+        elapsed_.start();
         timer_->start();
-        limit_timer_->start(duration_selector_->currentData().toInt() * 1000);
+        limit_timer_->start(limit_seconds_ * 1000);
+        apply_state(UiState::Recording);
         set_status("Recording");
+        refresh_elapsed();
     }
 
     void stop_recording() {
+        if (state_ != UiState::Recording) {
+            return;
+        }
         if (process_->state() == QProcess::Running) {
             process_->write("\n");
-            set_status("Finishing transcription...");
-            stop_button_->setEnabled(false);
         }
+        timer_->stop();
+        limit_timer_->stop();
+        apply_state(UiState::Stopping);
+        set_status("Finishing recording...");
     }
 
     void consume_worker_output() {
@@ -222,21 +258,94 @@ private:
             return;
         }
 
+        if (line.startsWith("READY|")) {
+            // Emitted at every prompt; only the first one starts a recording.
+            begin_recording();
+            return;
+        }
+
+        if (line.startsWith("PROCESSING|")) {
+            if (state_ == UiState::Stopping || state_ == UiState::Recording) {
+                timer_->stop();
+                limit_timer_->stop();
+                apply_state(UiState::Processing);
+                set_status("Transcribing...");
+            }
+            return;
+        }
+
+    }
+
+    // The single place any control's enabled state is decided.
+    void apply_state(UiState state) {
+        state_ = state;
+
+        const bool idle = state == UiState::Ready || state == UiState::Completed ||
+            state == UiState::Error;
+        start_button_->setEnabled(idle);
+        stop_button_->setEnabled(state == UiState::Recording);
+        // Changing the model or device mid-run would not affect the worker that
+        // is already running, so the controls stay locked until it finishes.
+        model_selector_->setEnabled(idle);
+        duration_selector_->setEnabled(idle);
+        device_selector_->setEnabled(idle && devices_ready_);
+
+        const bool has_text = !transcript_->toPlainText().trimmed().isEmpty();
+        save_button_->setEnabled(state == UiState::Completed || (state == UiState::Error && has_text));
+        copy_button_->setEnabled(save_button_->isEnabled());
+
+        switch (state) {
+            case UiState::LoadingModel:
+            case UiState::Stopping:
+            case UiState::Processing:
+                // Indeterminate: the worker gives no progress fraction here.
+                progress_->setRange(0, 0);
+                break;
+            case UiState::Recording:
+                progress_->setRange(0, limit_seconds_ > 0 ? limit_seconds_ : 100);
+                break;
+            default:
+                progress_->setRange(0, 100);
+                progress_->setValue(0);
+                break;
+        }
+    }
+
+    void refresh_elapsed() {
+        if (state_ != UiState::Recording) {
+            return;
+        }
+        // Monotonic: unaffected by clock changes or midnight rollover.
+        const qint64 seconds = elapsed_.elapsed() / 1000;
+        duration_label_->setText(QString("Duration: %1 of %2")
+            .arg(QTime(0, 0).addSecs(static_cast<int>(seconds)).toString("mm:ss"),
+                 QTime(0, 0).addSecs(limit_seconds_).toString("mm:ss")));
+        progress_->setValue(static_cast<int>(qMin<qint64>(seconds, limit_seconds_)));
     }
 
     // Asks the worker to enumerate capture devices before any recording starts.
     void populate_devices() {
         device_selector_->addItem("System default", -1);
+        device_selector_->setEnabled(false);
 
-        QProcess probe;
-        probe.start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", {"--list-devices"});
-        if (!probe.waitForFinished(4000)) {
-            probe.kill();
-            probe.waitForFinished(1000);
-            return;
-        }
+        // Enumeration runs asynchronously; blocking here froze the window for
+        // as long as the audio backend took to answer.
+        auto* probe = new QProcess(this);
+        connect(probe, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                [this, probe](int, QProcess::ExitStatus) {
+            add_enumerated_devices(QString::fromUtf8(probe->readAllStandardOutput()));
+            probe->deleteLater();
+        });
+        connect(probe, &QProcess::errorOccurred, this, [this, probe](QProcess::ProcessError) {
+            devices_ready_ = true;
+            apply_state(state_);
+            probe->deleteLater();
+        });
+        probe->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", {"--list-devices"});
+    }
 
-        const QStringList lines = QString::fromUtf8(probe.readAllStandardOutput()).split('\n');
+    void add_enumerated_devices(const QString& output) {
+        const QStringList lines = output.split('\n');
         for (const QString& line : lines) {
             if (!line.startsWith("DEVICE|")) {
                 continue;
@@ -250,6 +359,8 @@ private:
             const bool is_default = parts.at(2) == "default";
             device_selector_->addItem(is_default ? name + " (default)" : name, index);
         }
+        devices_ready_ = true;
+        apply_state(state_);
     }
 
     // The worker reports the validated model as MODEL|variant|language|bytes|path.
@@ -275,8 +386,7 @@ private:
 
         transcript_path_ = parts.mid(2).join('|');
         completed_ = true;
-        save_button_->setEnabled(true);
-        copy_button_->setEnabled(true);
+        apply_state(UiState::Completed);
         set_status("Transcription complete");
         process_->write("q\n");
     }
@@ -298,7 +408,7 @@ private:
         }
 
         error_shown_ = true;
-        set_idle(actionable_message(category, message));
+        set_failed(actionable_message(category, message));
         if (process_->state() == QProcess::Running) {
             process_->write("q\n");
         }
@@ -328,16 +438,17 @@ private:
             return;
         }
         if (error_shown_) {
-            // Keep the reported cause on screen instead of replacing it with "Ready".
-            set_idle(status_label_->text());
+            // Stay in Error: the reported cause remains on screen, and any text
+            // that did arrive stays saveable.
+            set_failed(status_label_->text());
             return;
         }
         if (status == QProcess::CrashExit) {
-            set_idle("The audio worker stopped unexpectedly. Start recording to try again.");
+            set_failed("The audio worker stopped unexpectedly. Start recording to try again.");
             return;
         }
         if (exit_code != 0) {
-            set_idle("The audio worker exited with code " + QString::number(exit_code) + ".");
+            set_failed("The audio worker exited with code " + QString::number(exit_code) + ".");
             return;
         }
         set_idle(completed_ ? "Transcription complete" : "Ready");
@@ -398,7 +509,21 @@ private:
     }
 
     void closeEvent(QCloseEvent* event) override {
+        const bool busy = state_ == UiState::Recording || state_ == UiState::Stopping ||
+            state_ == UiState::Processing || state_ == UiState::LoadingModel;
+        if (busy) {
+            const auto choice = QMessageBox::question(this, "Recording in progress",
+                "A recording is still being transcribed. Closing now discards it.\n\nClose anyway?",
+                QMessageBox::Close | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (choice != QMessageBox::Close) {
+                event->ignore();
+                return;
+            }
+        }
+
         closing_ = true;
+        timer_->stop();
+        limit_timer_->stop();
         if (process_->state() != QProcess::NotRunning) {
             process_->write("q\n");
             if (!process_->waitForFinished(3000)) {
@@ -416,11 +541,14 @@ private:
     void set_idle(const QString& status) {
         timer_->stop();
         limit_timer_->stop();
-        start_button_->setEnabled(true);
-        stop_button_->setEnabled(false);
-        model_selector_->setEnabled(true);
-        duration_selector_->setEnabled(true);
-        device_selector_->setEnabled(true);
+        apply_state(completed_ ? UiState::Completed : UiState::Ready);
+        set_status(status);
+    }
+
+    void set_failed(const QString& status) {
+        timer_->stop();
+        limit_timer_->stop();
+        apply_state(UiState::Error);
         set_status(status);
     }
 
@@ -436,11 +564,15 @@ private:
     QLabel* model_label_;
     QLabel* input_label_;
     QLabel* latency_label_;
+    QProgressBar* progress_;
     QPlainTextEdit* transcript_;
     QProcess* process_;
     QTimer* timer_;
     QTimer* limit_timer_;
-    QTime started_at_;
+    QElapsedTimer elapsed_;
+    UiState state_ = UiState::Ready;
+    int limit_seconds_ = 0;
+    bool devices_ready_ = false;
     QString output_buffer_;
     QString final_transcription_;
     QStringList partial_words_;
