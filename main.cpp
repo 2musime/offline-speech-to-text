@@ -2,10 +2,14 @@
 #include "miniaudio.h"
 #include "whisper.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <chrono>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -66,28 +70,129 @@ bool write_wav(const char* path, const std::vector<std::int16_t>& samples, std::
     return file.good();
 }
 
-bool transcribe(whisper_context* context, const std::vector<std::int16_t>& samples) {
-    std::vector<float> audio(samples.size());
-    for (std::size_t i = 0; i < samples.size(); ++i) {
-        audio[i] = static_cast<float>(samples[i]) / 32768.0f;
+struct SpeechSegment {
+    std::size_t begin;
+    std::size_t end;
+};
+
+std::vector<SpeechSegment> detect_speech_segments(
+    const std::vector<std::int16_t>& samples,
+    std::uint32_t sample_rate) {
+    constexpr std::size_t frame_duration_ms = 20;
+    constexpr std::size_t padding_duration_ms = 200;
+    constexpr std::size_t merge_gap_ms = 300;
+    constexpr float minimum_rms = 0.01f;
+    constexpr float noise_multiplier = 3.0f;
+
+    const std::size_t frame_size = sample_rate * frame_duration_ms / 1000;
+    const std::size_t padding = sample_rate * padding_duration_ms / 1000;
+    const std::size_t merge_gap = sample_rate * merge_gap_ms / 1000;
+    const std::size_t frame_count = (samples.size() + frame_size - 1) / frame_size;
+    if (frame_count == 0) {
+        return {};
     }
 
-    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.print_progress = false;
-    params.print_realtime = false;
-    params.print_timestamps = false;
-    params.single_segment = false;
-    params.language = "en";
-
-    if (whisper_full(context, params, audio.data(), audio.size()) != 0) {
-        std::cerr << "Whisper could not process the recording." << std::endl;
-        return false;
+    std::vector<float> energies(frame_count);
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+        const std::size_t begin = frame * frame_size;
+        const std::size_t end = std::min(begin + frame_size, samples.size());
+        float sum = 0.0f;
+        for (std::size_t i = begin; i < end; ++i) {
+            const float sample = static_cast<float>(samples[i]) / 32768.0f;
+            sum += sample * sample;
+        }
+        energies[frame] = std::sqrt(sum / static_cast<float>(end - begin));
     }
 
+    std::vector<float> sorted_energies = energies;
+    std::sort(sorted_energies.begin(), sorted_energies.end());
+    const float noise_floor = sorted_energies[sorted_energies.size() / 5];
+    const float threshold = std::max(minimum_rms, noise_floor * noise_multiplier);
+
+    std::vector<SpeechSegment> segments;
+    bool in_speech = false;
+    std::size_t speech_begin = 0;
+    std::size_t last_active_frame = 0;
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+        if (energies[frame] >= threshold) {
+            if (!in_speech) {
+                speech_begin = frame * frame_size;
+                in_speech = true;
+            }
+            last_active_frame = frame;
+        } else if (in_speech && frame > last_active_frame + merge_gap / frame_size) {
+            segments.push_back({speech_begin, std::min((last_active_frame + 1) * frame_size, samples.size())});
+            in_speech = false;
+        }
+    }
+    if (in_speech) {
+        segments.push_back({speech_begin, samples.size()});
+    }
+
+    for (SpeechSegment& segment : segments) {
+        segment.begin = segment.begin > padding ? segment.begin - padding : 0;
+        segment.end = std::min(segment.end + padding, samples.size());
+    }
+
+    std::vector<SpeechSegment> merged;
+    for (const SpeechSegment& segment : segments) {
+        if (!merged.empty() && segment.begin <= merged.back().end + merge_gap) {
+            merged.back().end = segment.end;
+        } else {
+            merged.push_back(segment);
+        }
+    }
+
+    constexpr std::size_t maximum_segment_duration = WHISPER_SAMPLE_RATE * 30;
+    std::vector<SpeechSegment> chunks;
+    for (const SpeechSegment& segment : merged) {
+        for (std::size_t begin = segment.begin; begin < segment.end; begin += maximum_segment_duration) {
+            chunks.push_back({begin, std::min(begin + maximum_segment_duration, segment.end)});
+        }
+    }
+    return chunks;
+}
+
+std::vector<std::int16_t> extract_speech(
+    const std::vector<std::int16_t>& samples,
+    const std::vector<SpeechSegment>& segments) {
+    std::vector<std::int16_t> speech;
+    for (const SpeechSegment& segment : segments) {
+        speech.insert(speech.end(), samples.begin() + segment.begin, samples.begin() + segment.end);
+    }
+    return speech;
+}
+
+bool transcribe(
+    whisper_context* context,
+    const std::vector<std::int16_t>& samples,
+    const std::vector<SpeechSegment>& segments) {
     std::string transcription;
-    for (int i = 0; i < whisper_full_n_segments(context); ++i) {
-        transcription += whisper_full_get_segment_text(context, i);
+    const auto transcription_start = std::chrono::steady_clock::now();
+    for (const SpeechSegment& segment : segments) {
+        const std::vector<std::int16_t> chunk(samples.begin() + segment.begin, samples.begin() + segment.end);
+        std::vector<float> audio(chunk.size());
+        for (std::size_t i = 0; i < chunk.size(); ++i) {
+            audio[i] = static_cast<float>(chunk[i]) / 32768.0f;
+        }
+
+        whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        params.print_progress = false;
+        params.print_realtime = false;
+        params.print_timestamps = false;
+        params.single_segment = false;
+        params.language = "en";
+
+        if (whisper_full(context, params, audio.data(), audio.size()) != 0) {
+            std::cerr << "Whisper could not process the speech segment." << std::endl;
+            return false;
+        }
+
+        for (int i = 0; i < whisper_full_n_segments(context); ++i) {
+            transcription += whisper_full_get_segment_text(context, i);
+        }
     }
+
     std::ofstream file("transcription.txt");
     if (!file) {
         std::cerr << "Could not save transcription.txt." << std::endl;
@@ -97,6 +202,9 @@ bool transcribe(whisper_context* context, const std::vector<std::int16_t>& sampl
 
     std::cout << "\nTranscription:\n" << transcription << std::endl;
     std::cout << "Saved transcription.txt" << std::endl;
+    const auto transcription_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - transcription_start).count();
+    std::cout << "Whisper processing time: " << transcription_ms << " ms" << std::endl;
     return true;
 }
 
@@ -158,7 +266,31 @@ int main(int argc, char** argv) {
                   << recording.samples.size() / static_cast<double>(sample_rate)
                   << " seconds)." << std::endl;
 
-        if (context != nullptr && !transcribe(context, recording.samples)) {
+        const auto vad_start = std::chrono::steady_clock::now();
+        const std::vector<SpeechSegment> speech_segments = detect_speech_segments(recording.samples, sample_rate);
+        const auto vad_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - vad_start).count();
+
+        if (speech_segments.empty()) {
+            std::cerr << "No speech detected. Try speaking closer to the microphone." << std::endl;
+            continue;
+        }
+
+        const std::vector<std::int16_t> speech = extract_speech(recording.samples, speech_segments);
+        if (!write_wav("speech.wav", speech, sample_rate)) {
+            std::cerr << "Could not save speech.wav." << std::endl;
+            break;
+        }
+
+        const double raw_seconds = recording.samples.size() / static_cast<double>(sample_rate);
+        const double speech_seconds = speech.size() / static_cast<double>(sample_rate);
+        const double reduction = raw_seconds > 0.0 ? (1.0 - speech_seconds / raw_seconds) * 100.0 : 0.0;
+        std::cout << "Speech detected: " << speech_seconds << " seconds in "
+                  << speech_segments.size() << " segment(s)." << std::endl;
+        std::cout << "Saved speech.wav. Removed " << reduction << "% of recorded audio."
+                  << " VAD time: " << vad_ms << " ms" << std::endl;
+
+        if (context != nullptr && !transcribe(context, recording.samples, speech_segments)) {
             break;
         }
     }
