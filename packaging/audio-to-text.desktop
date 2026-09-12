@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Audio to Text
+GenericName=Speech to Text
+Comment=Transcribe speech to text entirely on this computer
+Exec=audio_to_text
+Icon=audio-to-text
+Terminal=false
+Categories=AudioVideo;Recorder;
+Keywords=speech;transcription;dictation;whisper;offline;
+StartupNotify=true

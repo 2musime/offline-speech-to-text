@@ -1,5 +1,6 @@
 #include "partial_text.h"
 #include "ui_state.h"
+#include "version.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -26,7 +27,7 @@
 class AudioToTextWindow final : public QMainWindow {
 public:
     AudioToTextWindow() {
-        setWindowTitle("Audio to Text");
+        setWindowTitle(QString("Audio to Text %1").arg(AUDIO_TO_TEXT_VERSION));
         resize(760, 560);
 
         auto* central = new QWidget(this);
@@ -60,12 +61,14 @@ public:
         keep_audio_->setChecked(true);
         keep_audio_->setToolTip("When off, audio is transcribed and discarded; no WAV file is written.");
         privacy_button_ = new QPushButton("Privacy", central);
+        about_button_ = new QPushButton("About", central);
         delete_button_ = new QPushButton("Delete recordings", central);
 
         input_controls->addWidget(new QLabel("Microphone:", central));
         input_controls->addWidget(device_selector_, 1);
         input_controls->addWidget(keep_audio_);
         input_controls->addWidget(privacy_button_);
+        input_controls->addWidget(about_button_);
         input_controls->addWidget(delete_button_);
         layout->addLayout(input_controls);
 
@@ -120,6 +123,7 @@ public:
         });
         connect(save_button_, &QPushButton::clicked, this, [this] { save_transcript(); });
         connect(privacy_button_, &QPushButton::clicked, this, [this] { show_privacy_notice(); });
+        connect(about_button_, &QPushButton::clicked, this, [this] { show_about(); });
         connect(delete_button_, &QPushButton::clicked, this, [this] { delete_recordings(); });
         connect(process_, &QProcess::readyRead, this, [this] { consume_worker_output(); });
         connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
@@ -497,6 +501,16 @@ private:
         }
     }
 
+    void show_about() {
+        QMessageBox::about(this, "About Audio to Text",
+            QString("<b>Audio to Text %1</b><br>"
+                    "Build %2, %3<br><br>"
+                    "Offline speech to text. Audio never leaves this computer.<br><br>"
+                    "Transcription by whisper.cpp, audio capture by miniaudio, "
+                    "interface built with Qt 6.")
+                .arg(AUDIO_TO_TEXT_VERSION, AUDIO_TO_TEXT_GIT_COMMIT, AUDIO_TO_TEXT_BUILD_TYPE));
+    }
+
     void show_privacy_notice() {
         QMessageBox::information(this, "Privacy",
             "Audio is captured, analysed and transcribed entirely on this computer.\n\n"
@@ -626,6 +640,7 @@ private:
     QLabel* storage_label_;
     QCheckBox* keep_audio_;
     QPushButton* privacy_button_;
+    QPushButton* about_button_;
     QPushButton* delete_button_;
     QString data_directory_;
     QPlainTextEdit* transcript_;

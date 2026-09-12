@@ -1,5 +1,30 @@
 # Transcription performance
 
+## Supported hardware
+
+| Requirement | Detail |
+|---|---|
+| Architecture | x86-64. Whisper and ggml build for other architectures, but nothing here has been tested on one |
+| Operating system | Linux. Developed and tested on Fedora; the package targets Fedora and the build needs only GCC, CMake and Qt 6 |
+| Processor | Any x86-64 CPU. Transcription is CPU only; no GPU backend is enabled in this build |
+| Cores | Two are enough. Useful scaling stops around eight, see below |
+| Memory | 1 GB free for `base.en`, 1.5 GB for `small.en`. Measured peaks are 260 MB and 670 MB; the rest is headroom |
+| Disk | About 20 MB for the application, plus the model: 142 MB for `base.en` or 466 MB for `small.en` |
+| Audio | Any capture device miniaudio can open through PulseAudio, PipeWire or ALSA |
+| Network | None, ever, except when downloading a model |
+
+The figures below come from one machine. Your own numbers are one command away,
+and that is the honest way to know what to expect:
+
+```bash
+audio_to_text_cli --benchmark --input your-recording.wav models/ggml-base.en.bin
+```
+
+An RTF (real-time factor) below 1.0 means the machine transcribes faster than
+the audio plays, which is what streaming needs. Every configuration measured
+here is far below that, so slower hardware has considerable room before live
+transcription stops keeping up.
+
 ## Reproducible benchmarking
 
 `--benchmark` runs the production pipeline (VAD, then transcription) over a
