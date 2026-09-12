@@ -24,24 +24,21 @@ git status --porcelain          # empty
 git log --oneline develop..HEAD # nothing unmerged
 ```
 
-**2. The gates pass**
+**2. Every gate passes**
 
 ```bash
-./tests/check_guarantees.sh
-./tests/check_style.sh
-cmake -S . -B build-release -DAUDIO_TO_TEXT_WARNINGS_AS_ERRORS=ON
-cmake --build build-release --parallel
-ctest --test-dir build-release --output-on-failure
+tests/run_gates.sh
 ```
 
-**3. Sanitizers are clean**
+Guarantees, formatting, a build with warnings as errors, the full test suite,
+and the sanitizers. It names whatever failed. See
+[QUALITY_GATES.md](QUALITY_GATES.md).
 
-```bash
-cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DAUDIO_TO_TEXT_ENABLE_SANITIZERS=ON
-cmake --build build-sanitize --parallel
-./build-sanitize/audio_to_text_unit_tests
-QT_QPA_PLATFORM=offscreen ./build-sanitize/audio_to_text_gui_tests
-```
+**3. The interface has been used by a person**
+
+Start a recording, speak, stop, and confirm the transcript. No automated test
+clicks a button, so this step is the only thing standing between a broken
+interface and a release.
 
 **4. The version is bumped** in `CMakeLists.txt`, and `--version` reports it.
 
