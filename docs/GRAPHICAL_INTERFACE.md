@@ -41,6 +41,36 @@ of failures. They are now one line, showing only what is actually known.
 The progress bar is hidden unless something is running: an empty bar on an idle
 window suggests stalled work.
 
+## Keyboard
+
+Every shortcut appears next to its menu entry, so it can be found rather than
+memorised.
+
+| Keys | Action |
+|---|---|
+| `Ctrl+R` | Start recording, or stop one in progress |
+| `Esc` | Cancel whatever the worker is doing |
+| `Ctrl+S` | Save the transcript to a file |
+| `Ctrl+Shift+C` | Copy the whole transcript |
+| `Ctrl+Q` | Quit |
+
+`Ctrl+R` is one action rather than two, so the same key both starts and stops.
+Plain `Ctrl+C` is left to the transcript for copying a selection, which is why
+copying the whole transcript takes the shifted form.
+
+## State at a glance
+
+A coloured dot beside the status line carries the current state: grey when idle,
+red while recording, amber while working, green when finished, and red again on
+a failure. Colour alone is never the only signal; the dot also carries a tooltip
+and an accessible name naming the state, and the status line says the same thing
+in words.
+
+Disabled controls explain themselves. A greyed-out model selector says it cannot
+be changed until the recording finishes; a greyed-out Save says it becomes
+available once a transcription has finished. A control that is unavailable
+without saying why is a dead end.
+
 ## Build and run
 
 ```bash

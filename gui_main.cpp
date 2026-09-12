@@ -26,6 +26,7 @@
 #include <QTimer>
 #include <QTime>
 #include <QTextCursor>
+#include <QShortcut>
 #include <QStatusBar>
 #include <QVBoxLayout>
 
@@ -33,7 +34,9 @@ class AudioToTextWindow final : public QMainWindow {
 public:
     AudioToTextWindow() {
         setWindowTitle(QString("Audio to Text %1").arg(AUDIO_TO_TEXT_VERSION));
-        resize(760, 560);
+        resize(900, 620);
+        // Below this the settings row wraps and the transcript stops being usable.
+        setMinimumSize(640, 420);
 
         auto* central = new QWidget(this);
         auto* layout = new QVBoxLayout(central);
@@ -90,6 +93,7 @@ public:
         QFont start_font = start_button_->font();
         start_font.setBold(true);
         start_button_->setFont(start_font);
+        start_button_->setAccessibleName("Start recording");
         stop_button_ = new QPushButton("Stop Recording", record_panel);
         stop_button_->setMinimumHeight(36);
         stop_button_->setEnabled(false);
@@ -107,6 +111,9 @@ public:
         record_row->addStretch();
         record_layout->addLayout(record_row);
 
+        // A coloured dot reads at a glance; a word has to be found and parsed.
+        indicator_ = new QLabel("\u25cf", record_panel);
+        indicator_->setToolTip("Idle");
         status_label_ = new QLabel("Ready", record_panel);
         progress_ = new QProgressBar(record_panel);
         progress_->setTextVisible(false);
@@ -116,6 +123,7 @@ public:
         progress_->hide();
 
         auto* status_row = new QHBoxLayout();
+        status_row->addWidget(indicator_);
         status_row->addWidget(status_label_, 1);
         record_layout->addLayout(status_row);
         record_layout->addWidget(progress_);
@@ -142,6 +150,11 @@ public:
             "Choose a microphone, then press Start Recording.\n\n"
             "Your speech is transcribed on this computer. Nothing is uploaded.");
         transcript_->setReadOnly(true);
+        transcript_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        // Transcripts are read, not skimmed: a little more room per line helps.
+        transcript_->document()->setDocumentMargin(10);
+        transcript_->setAccessibleName("Transcript");
+        transcript_->setAccessibleDescription("The text transcribed from your recording");
         layout->addWidget(transcript_, 1);
         setCentralWidget(central);
 
@@ -434,12 +447,31 @@ private:
     void build_menus() {
         QMenu* file_menu = menuBar()->addMenu("&File");
         save_action_ = file_menu->addAction("&Save Transcript...", this, [this] { save_transcript(); });
+        save_action_->setShortcut(QKeySequence::Save);
+        // Ctrl+C belongs to the transcript for copying a selection, so the
+        // whole-transcript copy takes the shifted form.
         copy_action_ = file_menu->addAction("&Copy Transcript", this, [this] { copy_transcript(); });
+        copy_action_->setShortcut(QKeySequence("Ctrl+Shift+C"));
         file_menu->addSeparator();
         delete_action_ = file_menu->addAction("&Delete All Recordings...", this,
                                               [this] { delete_recordings(); });
         file_menu->addSeparator();
-        file_menu->addAction("&Quit", this, [this] { close(); });
+        file_menu->addAction("&Quit", this, [this] { close(); })
+            ->setShortcut(QKeySequence::Quit);
+
+        QMenu* recording_menu = menuBar()->addMenu("&Recording");
+        // One action rather than two, so a single key both starts and stops.
+        // The menu is what makes the shortcut discoverable.
+        record_action_ = recording_menu->addAction("&Start Recording", this, [this] {
+            if (state_ == UiState::Recording) {
+                stop_recording();
+            } else {
+                start_recording();
+            }
+        });
+        record_action_->setShortcut(QKeySequence("Ctrl+R"));
+        cancel_action_ = recording_menu->addAction("&Cancel", this, [this] { cancel_work(); });
+        cancel_action_->setShortcut(QKeySequence(Qt::Key_Escape));
 
         QMenu* help_menu = menuBar()->addMenu("&Help");
         help_menu->addAction("&Privacy", this, [this] { show_privacy_notice(); });
@@ -486,6 +518,12 @@ private:
         save_action_->setEnabled(controls.save);
         copy_action_->setEnabled(controls.copy);
         delete_action_->setEnabled(controls.delete_recordings);
+        record_action_->setEnabled(controls.start || controls.stop);
+        record_action_->setText(controls.stop ? "&Stop Recording" : "&Start Recording");
+        cancel_action_->setEnabled(controls.cancel);
+
+        apply_indicator(state);
+        explain_disabled_controls(state, controls);
 
         // Visible only while something is running, so an idle window does not
         // show a bar that looks like stalled work.
@@ -508,6 +546,68 @@ private:
     }
 
     // Elapsed against the limit, so the limit is visible before you commit to it.
+    // Colour carries the state; the tooltip spells it out for anyone who cannot
+    // rely on colour alone.
+    void apply_indicator(UiState state) {
+        QString colour = "#9e9e9e";
+        QString meaning = "Idle";
+        switch (state) {
+            case UiState::Recording:
+                colour = "#d32f2f";
+                meaning = "Recording";
+                break;
+            case UiState::LoadingModel:
+            case UiState::Stopping:
+            case UiState::Processing:
+                colour = "#f9a825";
+                meaning = "Working";
+                break;
+            case UiState::Completed:
+                colour = "#2e7d32";
+                meaning = "Finished";
+                break;
+            case UiState::Error:
+                colour = "#c62828";
+                meaning = "Stopped with a problem";
+                break;
+            default:
+                break;
+        }
+        indicator_->setStyleSheet("color: " + colour + ";");
+        indicator_->setToolTip(meaning);
+        indicator_->setAccessibleName(meaning);
+    }
+
+    // A disabled control that does not say why is a dead end. Each one explains
+    // itself in the state it is unavailable in.
+    void explain_disabled_controls(UiState state, const ControlStates& controls) {
+        const QString busy = "Not available while a recording is in progress.";
+
+        start_button_->setToolTip(controls.start
+            ? "Begin recording (Ctrl+R)"
+            : busy);
+        stop_button_->setToolTip(controls.stop
+            ? "Stop recording and transcribe (Ctrl+R)"
+            : (controls.cancel ? "Abandon this recording (Esc)"
+                               : "Nothing is running."));
+
+        const QString settings_tip = ui_state_is_idle(state)
+            ? QString()
+            : "Cannot be changed until the current recording finishes.";
+        model_selector_->setToolTip(settings_tip);
+        duration_selector_->setToolTip(settings_tip);
+        keep_audio_->setToolTip(ui_state_is_idle(state)
+            ? "When off, audio is transcribed and discarded; no WAV file is written."
+            : settings_tip);
+        device_selector_->setToolTip(!devices_ready_
+            ? "Looking for microphones..."
+            : settings_tip);
+
+        const QString nothing_yet = "Available once a transcription has finished.";
+        save_button_->setToolTip(controls.save ? "Save the transcript to a file (Ctrl+S)" : nothing_yet);
+        copy_button_->setToolTip(controls.copy ? "Copy the transcript (Ctrl+Shift+C)" : nothing_yet);
+    }
+
     void refresh_clock(qint64 seconds) {
         const int limit = limit_seconds_ > 0 ? limit_seconds_
                                              : duration_selector_->currentData().toInt();
@@ -826,6 +926,7 @@ private:
     QLabel* status_label_;
     QLabel* duration_label_;
     QLabel* latency_label_;
+    QLabel* indicator_;
     QLabel* context_label_;
     QString model_summary_;
     QString input_summary_;
@@ -833,6 +934,8 @@ private:
     QAction* save_action_;
     QAction* copy_action_;
     QAction* delete_action_;
+    QAction* record_action_;
+    QAction* cancel_action_;
     QProgressBar* progress_;
     QCheckBox* keep_audio_;
     QString data_directory_;
