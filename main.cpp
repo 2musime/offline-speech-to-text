@@ -6,7 +6,9 @@
 #include <atomic>
 #include <cstdint>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -19,8 +21,236 @@
 #include <vector>
 
 #ifdef __linux__
+#include <signal.h>
 #include <sys/resource.h>
+#include <unistd.h>
 #endif
+
+enum class ErrorCategory {
+    Microphone,
+    Model,
+    Recording,
+    Transcription,
+    FileSaving,
+    Worker
+};
+
+const char* error_category_name(ErrorCategory category) {
+    switch (category) {
+        case ErrorCategory::Microphone: return "MICROPHONE";
+        case ErrorCategory::Model: return "MODEL";
+        case ErrorCategory::Recording: return "RECORDING";
+        case ErrorCategory::Transcription: return "TRANSCRIPTION";
+        case ErrorCategory::FileSaving: return "FILE_SAVING";
+        case ErrorCategory::Worker: return "WORKER";
+    }
+    return "WORKER";
+}
+
+// Failures that end the current recording attempt.
+void report_error(ErrorCategory category, const std::string& message) {
+    std::cerr << "ERROR|" << error_category_name(category) << '|' << message << std::endl;
+}
+
+// Advisories that do not stop processing.
+void report_warning(ErrorCategory category, const std::string& message) {
+    std::cerr << "WARN|" << error_category_name(category) << '|' << message << std::endl;
+}
+
+namespace {
+volatile std::sig_atomic_t shutdown_flag = 0;
+}
+
+extern "C" void request_shutdown(int) {
+    shutdown_flag = 1;
+}
+
+bool shutdown_is_requested() {
+    return shutdown_flag != 0;
+}
+
+// std::getline retries internally on EINTR, so a signal can never interrupt it.
+// Reading the descriptor directly keeps Ctrl+C responsive while awaiting a command.
+// Single-threaded use only: the leftover buffer is shared between calls.
+bool read_command(std::string& command) {
+    command.clear();
+#ifdef __linux__
+    static std::string buffer;
+    while (true) {
+        const std::size_t newline = buffer.find('\n');
+        if (newline != std::string::npos) {
+            command.assign(buffer, 0, newline);
+            buffer.erase(0, newline + 1);
+            return true;
+        }
+
+        char chunk[256];
+        const ssize_t count = ::read(STDIN_FILENO, chunk, sizeof(chunk));
+        if (count > 0) {
+            buffer.append(chunk, static_cast<std::size_t>(count));
+            continue;
+        }
+        if (count == 0) {
+            if (buffer.empty()) {
+                return false;
+            }
+            command = buffer;
+            buffer.clear();
+            return true;
+        }
+        if (errno == EINTR) {
+            if (shutdown_is_requested()) {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+#else
+    return static_cast<bool>(std::getline(std::cin, command));
+#endif
+}
+
+void install_shutdown_handlers() {
+#ifdef __linux__
+    // No SA_RESTART: a blocking std::getline must return when the signal lands.
+    struct sigaction action {};
+    action.sa_handler = request_shutdown;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
+#else
+    std::signal(SIGINT, request_shutdown);
+    std::signal(SIGTERM, request_shutdown);
+#endif
+}
+
+class WhisperContext {
+public:
+    WhisperContext() = default;
+
+    explicit WhisperContext(const std::string& model_path) {
+        whisper_context_params context_params = whisper_context_default_params();
+        context_ = whisper_init_from_file_with_params(model_path.c_str(), context_params);
+    }
+
+    ~WhisperContext() {
+        release();
+    }
+
+    WhisperContext(const WhisperContext&) = delete;
+    WhisperContext& operator=(const WhisperContext&) = delete;
+
+    WhisperContext(WhisperContext&& other) noexcept : context_(other.context_) {
+        other.context_ = nullptr;
+    }
+
+    WhisperContext& operator=(WhisperContext&& other) noexcept {
+        if (this != &other) {
+            release();
+            context_ = other.context_;
+            other.context_ = nullptr;
+        }
+        return *this;
+    }
+
+    whisper_context* get() const {
+        return context_;
+    }
+
+    explicit operator bool() const {
+        return context_ != nullptr;
+    }
+
+private:
+    void release() {
+        if (context_ != nullptr) {
+            whisper_free(context_);
+            context_ = nullptr;
+        }
+    }
+
+    whisper_context* context_ = nullptr;
+};
+
+class CaptureDevice {
+public:
+    CaptureDevice() = default;
+
+    ~CaptureDevice() {
+        stop();
+        if (initialized_) {
+            ma_device_uninit(&device_);
+            initialized_ = false;
+        }
+    }
+
+    CaptureDevice(const CaptureDevice&) = delete;
+    CaptureDevice& operator=(const CaptureDevice&) = delete;
+    CaptureDevice(CaptureDevice&&) = delete;
+    CaptureDevice& operator=(CaptureDevice&&) = delete;
+
+    bool initialize(const ma_device_config& config) {
+        if (initialized_ || ma_device_init(nullptr, &config, &device_) != MA_SUCCESS) {
+            return false;
+        }
+        initialized_ = true;
+        return true;
+    }
+
+    bool start() {
+        if (!initialized_ || ma_device_start(&device_) != MA_SUCCESS) {
+            return false;
+        }
+        running_ = true;
+        return true;
+    }
+
+    void stop() {
+        if (initialized_ && running_) {
+            ma_device_stop(&device_);
+            running_ = false;
+        }
+    }
+
+private:
+    ma_device device_{};
+    bool initialized_ = false;
+    bool running_ = false;
+};
+
+class ScopedThread {
+public:
+    ScopedThread() = default;
+
+    explicit ScopedThread(std::thread thread) : thread_(std::move(thread)) {}
+
+    ~ScopedThread() {
+        join();
+    }
+
+    ScopedThread(const ScopedThread&) = delete;
+    ScopedThread& operator=(const ScopedThread&) = delete;
+    ScopedThread(ScopedThread&& other) noexcept : thread_(std::move(other.thread_)) {}
+
+    ScopedThread& operator=(ScopedThread&& other) noexcept {
+        if (this != &other) {
+            join();
+            thread_ = std::move(other.thread_);
+        }
+        return *this;
+    }
+
+    void join() {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    std::thread thread_;
+};
 
 struct Recording {
     std::mutex mutex;
@@ -388,7 +618,7 @@ bool run_transcription(
         params.n_threads = thread_count;
 
         if (whisper_full(context, params, audio.data(), audio.size()) != 0) {
-            std::cerr << "Whisper could not process the speech segment." << std::endl;
+            report_error(ErrorCategory::Transcription, "Whisper could not process the speech segment.");
             return false;
         }
 
@@ -415,7 +645,7 @@ bool transcribe(
 
     std::ofstream file("transcription.txt");
     if (!file) {
-        std::cerr << "Could not save transcription.txt." << std::endl;
+        report_error(ErrorCategory::FileSaving, "Could not save transcription.txt.");
         return false;
     }
     file << result.text << '\n';
@@ -440,7 +670,8 @@ void streaming_worker(
     pending.reserve(window_size + stride_size);
     const long long cpu_start = process_cpu_milliseconds();
 
-    while (!capture.finished.load(std::memory_order_acquire) || capture.buffer.available() > 0) {
+    while (!shutdown_is_requested() &&
+           (!capture.finished.load(std::memory_order_acquire) || capture.buffer.available() > 0)) {
         if (capture.buffer.read(incoming, sample_rate / 10) > 0) {
             pending.insert(pending.end(), incoming.begin(), incoming.end());
         } else {
@@ -453,7 +684,7 @@ void streaming_worker(
             TranscriptionResult result;
             const std::vector<SpeechSegment> range{{0, window.size()}};
             if (!run_transcription(context, window, range, thread_count, result)) {
-                std::cerr << "Streaming transcription failed for an audio window." << std::endl;
+                report_error(ErrorCategory::Transcription, "Streaming transcription failed for an audio window.");
                 return;
             }
             const auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -466,7 +697,7 @@ void streaming_worker(
     }
 
     if (capture.overflowed.load(std::memory_order_acquire)) {
-        std::cerr << "Streaming buffer overflowed; audio was dropped." << std::endl;
+        report_warning(ErrorCategory::Recording, "Streaming buffer overflowed; audio was dropped.");
     }
     std::cout << "Streaming worker CPU time: "
               << process_cpu_milliseconds() - cpu_start << " ms" << std::endl;
@@ -576,20 +807,18 @@ bool compare_models(
     std::cout << "\nModel comparison (same audio and VAD segments):\n";
     const std::vector<SpeechSegment> speech_range{{0, original.size()}};
     for (const std::string& model_path : model_paths) {
-        whisper_context_params context_params = whisper_context_default_params();
-        whisper_context* context = whisper_init_from_file_with_params(model_path.c_str(), context_params);
-        if (context == nullptr) {
-            std::cerr << "Could not load Whisper model: " << model_path << std::endl;
+        WhisperContext context(model_path);
+        if (!context) {
+            report_error(ErrorCategory::Model, "Could not load Whisper model: " + model_path);
             return false;
         }
 
         TranscriptionResult original_result;
         TranscriptionResult cleaned_result;
         const bool success = run_transcription(
-                context, original, speech_range, thread_count, original_result) &&
-            run_transcription(context, cleaned, speech_range, thread_count, cleaned_result);
+                context.get(), original, speech_range, thread_count, original_result) &&
+            run_transcription(context.get(), cleaned, speech_range, thread_count, cleaned_result);
         const long memory_kb = peak_memory_kb();
-        whisper_free(context);
         if (!success) {
             return false;
         }
@@ -608,7 +837,7 @@ bool compare_models(
     return true;
 }
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     constexpr ma_uint32 sample_rate = WHISPER_SAMPLE_RATE;
     Recording recording;
 
@@ -621,25 +850,25 @@ int main(int argc, char** argv) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
+    install_shutdown_handlers();
+
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
     std::cout << "CPU threads detected: " << (hardware_threads == 0 ? 1 : hardware_threads)
               << ", Whisper threads: " << thread_count
               << ", recording limit: " << duration_seconds << " seconds" << std::endl;
 
-    whisper_context* context = nullptr;
-    if (!compare_mode) {
-        whisper_context_params context_params = whisper_context_default_params();
-        context = whisper_init_from_file_with_params(model_paths[0].c_str(), context_params);
-        if (context == nullptr) {
-            std::cerr << "Could not load Whisper model: " << model_paths[0] << std::endl;
-            return 1;
-        }
-    }
-
     if (compare_mode && streaming_mode) {
         std::cerr << "--stream cannot be combined with --compare." << std::endl;
-        whisper_free(context);
         return 1;
+    }
+
+    WhisperContext context;
+    if (!compare_mode) {
+        context = WhisperContext(model_paths[0]);
+        if (!context) {
+            report_error(ErrorCategory::Model, "Could not load Whisper model: " + model_paths[0]);
+            return 1;
+        }
     }
 
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
@@ -653,17 +882,20 @@ int main(int argc, char** argv) {
     config.dataCallback = capture_dispatch_callback;
     config.pUserData = &capture_state;
 
-    ma_device device;
-    if (ma_device_init(nullptr, &config, &device) != MA_SUCCESS) {
-        std::cerr << "Could not open the microphone." << std::endl;
+    CaptureDevice device;
+    if (!device.initialize(config)) {
+        report_error(ErrorCategory::Microphone, "Could not open the microphone.");
         return 1;
     }
 
-    while (true) {
+    while (!shutdown_is_requested()) {
         std::cout << "Press Enter to start recording, or type q to quit." << std::endl;
         std::string command;
-        std::getline(std::cin, command);
-        if (!std::cin || command == "q" || command == "Q") {
+        const bool have_command = read_command(command);
+        if (shutdown_is_requested()) {
+            break;
+        }
+        if (!have_command || command == "q" || command == "Q") {
             break;
         }
 
@@ -677,17 +909,18 @@ int main(int argc, char** argv) {
         if (streaming_mode) {
             streaming_capture.reset();
             streaming_capture.recording.store(true, std::memory_order_release);
-            if (ma_device_start(&device) != MA_SUCCESS) {
+            if (!device.start()) {
                 streaming_capture.recording.store(false, std::memory_order_release);
-                std::cerr << "Could not start recording." << std::endl;
+                report_error(ErrorCategory::Microphone, "Could not start recording.");
                 break;
             }
 
-            std::thread worker(streaming_worker, std::ref(streaming_capture), context, thread_count, sample_rate);
+            ScopedThread worker(std::thread(
+                streaming_worker, std::ref(streaming_capture), context.get(), thread_count, sample_rate));
             std::cout << "Streaming recording... Press Enter to stop." << std::endl;
-            std::getline(std::cin, command);
+            read_command(command);
             streaming_capture.recording.store(false, std::memory_order_release);
-            ma_device_stop(&device);
+            device.stop();
             streaming_capture.finished.store(true, std::memory_order_release);
             worker.join();
 
@@ -698,31 +931,36 @@ int main(int argc, char** argv) {
                 streaming_capture.all_samples.begin(),
                 streaming_capture.all_samples.begin() + sample_count);
             if (streaming_capture.overflowed.load(std::memory_order_acquire)) {
-                std::cerr << "Recording reached its limit or the streaming buffer overflowed; audio was truncated."
-                          << std::endl;
+                report_warning(ErrorCategory::Recording,
+                    "Recording reached its limit or the streaming buffer overflowed; audio was truncated.");
             }
         } else {
-            if (ma_device_start(&device) != MA_SUCCESS) {
-                std::cerr << "Could not start recording." << std::endl;
+            if (!device.start()) {
+                report_error(ErrorCategory::Microphone, "Could not start recording.");
                 break;
             }
 
             std::cout << "Recording... Press Enter to stop." << std::endl;
-            std::getline(std::cin, command);
-            ma_device_stop(&device);
+            read_command(command);
+            device.stop();
+        }
+
+        if (shutdown_is_requested()) {
+            break;
         }
 
         if (recording.samples.empty()) {
-            std::cerr << "No audio was captured. Check the microphone and try again." << std::endl;
+            report_error(ErrorCategory::Recording, "No audio was captured. Check the microphone and try again.");
             continue;
         }
         if (recording.limit_reached.load(std::memory_order_acquire)) {
-            std::cerr << "Recording reached the " << duration_seconds
-                      << " second limit; extra audio was discarded." << std::endl;
+            report_warning(ErrorCategory::Recording,
+                "Recording reached the " + std::to_string(duration_seconds) +
+                " second limit; extra audio was discarded.");
         }
 
         if (!write_wav("recording.wav", recording.samples, sample_rate)) {
-            std::cerr << "Could not save recording.wav." << std::endl;
+            report_error(ErrorCategory::FileSaving, "Could not save recording.wav.");
             break;
         }
 
@@ -733,7 +971,7 @@ int main(int argc, char** argv) {
         const NoiseProfile noise_profile = measure_noise_floor(recording.samples, sample_rate);
         const std::vector<std::int16_t> cleaned_samples = reduce_noise(recording.samples, noise_profile);
         if (!write_wav("cleaned.wav", cleaned_samples, sample_rate)) {
-            std::cerr << "Could not save cleaned.wav." << std::endl;
+            report_error(ErrorCategory::FileSaving, "Could not save cleaned.wav.");
             break;
         }
 
@@ -751,14 +989,14 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now() - vad_start).count();
 
         if (speech_segments.empty()) {
-            std::cerr << "No speech detected. Try speaking closer to the microphone." << std::endl;
+            report_error(ErrorCategory::Recording, "No speech detected. Try speaking closer to the microphone.");
             continue;
         }
 
         const std::vector<std::int16_t> speech = extract_speech(recording.samples, speech_segments);
         const std::vector<std::int16_t> cleaned_speech = extract_speech(cleaned_samples, speech_segments);
         if (!write_wav("speech.wav", speech, sample_rate)) {
-            std::cerr << "Could not save speech.wav." << std::endl;
+            report_error(ErrorCategory::FileSaving, "Could not save speech.wav.");
             break;
         }
 
@@ -774,15 +1012,31 @@ int main(int argc, char** argv) {
             if (!compare_models(model_paths, speech, cleaned_speech, thread_count)) {
                 break;
             }
-        } else if (context != nullptr) {
+        } else if (context) {
             const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
-            if (!transcribe(context, speech, speech_range, thread_count)) {
+            if (!transcribe(context.get(), speech, speech_range, thread_count)) {
                 break;
             }
         }
     }
 
-    ma_device_uninit(&device);
-    whisper_free(context);
+    if (shutdown_is_requested()) {
+        std::cout << "\nShutting down." << std::endl;
+    }
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::bad_alloc&) {
+        report_error(ErrorCategory::Worker, "Ran out of memory.");
+        return 1;
+    } catch (const std::exception& error) {
+        report_error(ErrorCategory::Worker, std::string("Unexpected failure: ") + error.what());
+        return 1;
+    } catch (...) {
+        report_error(ErrorCategory::Worker, "Unexpected failure.");
+        return 1;
+    }
 }

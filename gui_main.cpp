@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QClipboard>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFile>
@@ -82,11 +83,14 @@ public:
         });
         connect(save_button_, &QPushButton::clicked, this, [this] { save_transcript(); });
         connect(process_, &QProcess::readyRead, this, [this] { consume_worker_output(); });
-        connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-            set_idle("Worker error: " + process_->errorString());
+        connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+            if (closing_ || error == QProcess::Crashed) {
+                return;
+            }
+            set_idle("Audio worker problem: " + process_->errorString());
         });
         connect(process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
-                this, [this](int, QProcess::ExitStatus) { set_idle("Ready"); });
+                this, [this](int exit_code, QProcess::ExitStatus status) { handle_worker_exit(exit_code, status); });
         connect(timer_, &QTimer::timeout, this, [this] {
             const int seconds = started_at_.secsTo(QTime::currentTime());
             duration_label_->setText("Duration: " + QTime(0, 0).addSecs(seconds).toString("mm:ss"));
@@ -105,6 +109,8 @@ private:
 
         transcript_->clear();
         final_transcription_.clear();
+        completed_ = false;
+        error_shown_ = false;
         const QString model = model_selector_->currentData().toString();
         const QString duration = duration_selector_->currentData().toString();
         process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
@@ -148,6 +154,11 @@ private:
             return;
         }
 
+        if (line.startsWith("ERROR|") || line.startsWith("WARN|")) {
+            handle_worker_report(line);
+            return;
+        }
+
         if (!pending_text_label_.isEmpty()) {
             if (pending_text_label_ == "partial") {
                 append_partial_text(line);
@@ -169,24 +180,76 @@ private:
             pending_text_label_ = "final";
             return;
         }
-        if (line.contains("Recording reached the") && line.contains("second limit")) {
-            set_status("Recording stopped at the selected limit; processing...");
-            return;
-        }
         if (line.contains("Saved transcription.txt")) {
+            completed_ = true;
             save_button_->setEnabled(true);
             copy_button_->setEnabled(true);
             set_status("Transcription complete");
             process_->write("q\n");
+        }
+    }
+
+    // Worker reports arrive as SEVERITY|CATEGORY|message.
+    void handle_worker_report(const QString& line) {
+        const QStringList parts = line.split('|');
+        if (parts.size() < 3) {
             return;
         }
-        if (line.contains("Could not open the microphone")) {
-            set_idle("Microphone error: could not open the microphone.");
+
+        const QString severity = parts.at(0);
+        const QString category = parts.at(1);
+        const QString message = parts.mid(2).join('|');
+
+        if (severity == "WARN") {
+            set_status(message);
             return;
         }
-        if (line.contains("Could not load Whisper model")) {
-            set_idle("Model error: could not load the selected model.");
+
+        pending_text_label_.clear();
+        error_shown_ = true;
+        set_idle(actionable_message(category, message));
+        if (process_->state() == QProcess::Running) {
+            process_->write("q\n");
         }
+    }
+
+    static QString actionable_message(const QString& category, const QString& message) {
+        if (category == "MICROPHONE") {
+            return message + " Check that a microphone is connected and that this application may use it.";
+        }
+        if (category == "MODEL") {
+            return message + " Download the model into models/ and select it again.";
+        }
+        if (category == "RECORDING") {
+            return message + " Speak closer to the microphone and record again.";
+        }
+        if (category == "TRANSCRIPTION") {
+            return message + " Try the base.en model, or record a shorter clip.";
+        }
+        if (category == "FILE_SAVING") {
+            return message + " Check free disk space and write permissions for the working directory.";
+        }
+        return message;
+    }
+
+    void handle_worker_exit(int exit_code, QProcess::ExitStatus status) {
+        if (closing_) {
+            return;
+        }
+        if (error_shown_) {
+            // Keep the reported cause on screen instead of replacing it with "Ready".
+            set_idle(status_label_->text());
+            return;
+        }
+        if (status == QProcess::CrashExit) {
+            set_idle("The audio worker stopped unexpectedly. Start recording to try again.");
+            return;
+        }
+        if (exit_code != 0) {
+            set_idle("The audio worker exited with code " + QString::number(exit_code) + ".");
+            return;
+        }
+        set_idle(completed_ ? "Transcription complete" : "Ready");
     }
 
     void append_partial_text(const QString& incoming) {
@@ -248,6 +311,18 @@ private:
         transcript_->moveCursor(QTextCursor::End);
     }
 
+    void closeEvent(QCloseEvent* event) override {
+        closing_ = true;
+        if (process_->state() != QProcess::NotRunning) {
+            process_->write("q\n");
+            if (!process_->waitForFinished(3000)) {
+                process_->kill();
+                process_->waitForFinished(1000);
+            }
+        }
+        QMainWindow::closeEvent(event);
+    }
+
     void set_status(const QString& status) {
         status_label_->setText(status);
     }
@@ -278,6 +353,9 @@ private:
     QString output_buffer_;
     QString pending_text_label_;
     QString final_transcription_;
+    bool completed_ = false;
+    bool closing_ = false;
+    bool error_shown_ = false;
 };
 
 int main(int argc, char* argv[]) {
