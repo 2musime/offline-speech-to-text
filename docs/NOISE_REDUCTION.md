@@ -1,6 +1,8 @@
 # Noise reduction
 
-The recorder preserves the raw microphone input as `recording.wav` and writes a processed copy as `cleaned.wav`.
+The recorder preserves the raw microphone input and writes a processed copy
+alongside it. Both are stamped artefacts in the application data directory; see
+[FILE_STORAGE.md](FILE_STORAGE.md).
 
 ## Analysis
 
@@ -18,7 +20,7 @@ In normal single-model mode, Whisper runs **once**, on the raw speech extracted
 from `recording.wav`. The transcript and its processing time are printed, and
 the transcript is saved to `transcription.txt`.
 
-`cleaned.wav` is still produced as a diagnostic artifact so the noise floor and
+The cleaned artefact is still produced as a diagnostic so the noise floor and
 attenuation can be inspected, but it is not transcribed in normal mode.
 
 In `--compare` mode, each selected model still reports original and cleaned

@@ -109,6 +109,7 @@ private:
 
         transcript_->clear();
         final_transcription_.clear();
+        transcript_path_.clear();
         completed_ = false;
         error_shown_ = false;
         const QString model = model_selector_->currentData().toString();
@@ -159,6 +160,11 @@ private:
             return;
         }
 
+        if (line.startsWith("SAVED|")) {
+            handle_saved_line(line);
+            return;
+        }
+
         if (!pending_text_label_.isEmpty()) {
             if (pending_text_label_ == "partial") {
                 append_partial_text(line);
@@ -180,13 +186,21 @@ private:
             pending_text_label_ = "final";
             return;
         }
-        if (line.contains("Saved transcription.txt")) {
-            completed_ = true;
-            save_button_->setEnabled(true);
-            copy_button_->setEnabled(true);
-            set_status("Transcription complete");
-            process_->write("q\n");
+    }
+
+    // The worker announces each artefact as SAVED|KIND|path.
+    void handle_saved_line(const QString& line) {
+        const QStringList parts = line.split('|');
+        if (parts.size() < 3 || parts.at(1) != "TRANSCRIPT") {
+            return;
         }
+
+        transcript_path_ = parts.mid(2).join('|');
+        completed_ = true;
+        save_button_->setEnabled(true);
+        copy_button_->setEnabled(true);
+        set_status("Transcription complete");
+        process_->write("q\n");
     }
 
     // Worker reports arrive as SEVERITY|CATEGORY|message.
@@ -291,7 +305,8 @@ private:
     }
 
     void save_transcript() {
-        const QString path = QFileDialog::getSaveFileName(this, "Save transcription", "transcription.txt");
+        const QString suggested = transcript_path_.isEmpty() ? QString("transcription.txt") : transcript_path_;
+        const QString path = QFileDialog::getSaveFileName(this, "Save a copy of the transcription", suggested);
         if (path.isEmpty()) {
             return;
         }
@@ -353,6 +368,7 @@ private:
     QString output_buffer_;
     QString pending_text_label_;
     QString final_transcription_;
+    QString transcript_path_;
     bool completed_ = false;
     bool closing_ = false;
     bool error_shown_ = false;

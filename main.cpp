@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cerrno>
+#include <cstdlib>
 #include <cmath>
 #include <csignal>
 #include <filesystem>
@@ -14,14 +15,20 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <iomanip>
 #include <numeric>
+#include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
 #ifdef __linux__
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
@@ -252,6 +259,216 @@ private:
     std::thread thread_;
 };
 
+namespace fs = std::filesystem;
+
+// Files are written only inside a directory the application owns.
+fs::path application_data_directory() {
+    const char* data_home = std::getenv("XDG_DATA_HOME");
+    if (data_home != nullptr && data_home[0] == '/') {
+        return fs::path(data_home) / "audio-to-text";
+    }
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && home[0] == '/') {
+        return fs::path(home) / ".local" / "share" / "audio-to-text";
+    }
+    return fs::current_path() / ".audio-to-text";
+}
+
+// Creates the directory if needed and restricts it to the owner.
+bool ensure_private_directory(const fs::path& directory) {
+    std::error_code error;
+    fs::create_directories(directory, error);
+    if (error && !fs::is_directory(directory)) {
+        return false;
+    }
+    if (!fs::is_directory(directory)) {
+        return false;
+    }
+#ifdef __linux__
+    if (::chmod(directory.c_str(), S_IRWXU) != 0) {
+        return false;
+    }
+#endif
+    return true;
+}
+
+// True when candidate resolves to root itself or something beneath it.
+bool path_is_within(const fs::path& candidate, const fs::path& root) {
+    std::error_code error;
+    const fs::path resolved_candidate = fs::weakly_canonical(candidate, error);
+    if (error) {
+        return false;
+    }
+    const fs::path resolved_root = fs::weakly_canonical(root, error);
+    if (error) {
+        return false;
+    }
+
+    auto candidate_part = resolved_candidate.begin();
+    auto root_part = resolved_root.begin();
+    for (; root_part != resolved_root.end(); ++root_part, ++candidate_part) {
+        if (candidate_part == resolved_candidate.end() || *candidate_part != *root_part) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Groups the artefacts of one recording: 20260912-154233-7f3a.
+std::string session_stamp() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+    std::tm parts{};
+#ifdef __linux__
+    localtime_r(&seconds, &parts);
+#else
+    parts = *std::localtime(&seconds);
+#endif
+
+    std::random_device device;
+    std::ostringstream stream;
+    stream << std::put_time(&parts, "%Y%m%d-%H%M%S") << '-'
+           << std::hex << std::setw(4) << std::setfill('0') << (device() & 0xffff);
+    return stream.str();
+}
+
+// Writes through a temporary file and renames, so readers never observe a
+// partial file. Owner-only permissions; refuses to follow a symbolic link.
+class AtomicFile {
+public:
+    explicit AtomicFile(fs::path target)
+        : target_(std::move(target)),
+          temporary_(target_.string() + ".tmp-" + std::to_string(::getpid())) {}
+
+    ~AtomicFile() {
+        if (descriptor_ >= 0) {
+            ::close(descriptor_);
+            descriptor_ = -1;
+        }
+        if (!committed_) {
+            std::error_code error;
+            fs::remove(temporary_, error);
+        }
+    }
+
+    AtomicFile(const AtomicFile&) = delete;
+    AtomicFile& operator=(const AtomicFile&) = delete;
+    AtomicFile(AtomicFile&&) = delete;
+    AtomicFile& operator=(AtomicFile&&) = delete;
+
+    bool open() {
+        std::error_code error;
+        fs::remove(temporary_, error);
+        // O_EXCL with O_CREAT never follows a link at the final component.
+        descriptor_ = ::open(
+            temporary_.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            S_IRUSR | S_IWUSR);
+        return descriptor_ >= 0;
+    }
+
+    bool write(const void* data, std::size_t size) {
+        const char* bytes = static_cast<const char*>(data);
+        std::size_t written = 0;
+        while (written < size) {
+            const ssize_t count = ::write(descriptor_, bytes + written, size - written);
+            if (count < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return false;
+            }
+            written += static_cast<std::size_t>(count);
+        }
+        return true;
+    }
+
+    bool commit() {
+        if (descriptor_ < 0 || ::fsync(descriptor_) != 0) {
+            return false;
+        }
+        const int closed = ::close(descriptor_);
+        descriptor_ = -1;
+        if (closed != 0 || ::rename(temporary_.c_str(), target_.c_str()) != 0) {
+            return false;
+        }
+        sync_parent_directory();
+        committed_ = true;
+        return true;
+    }
+
+private:
+    // Makes the rename itself durable, not just the file contents.
+    void sync_parent_directory() const {
+        const int directory = ::open(
+            target_.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directory >= 0) {
+            ::fsync(directory);
+            ::close(directory);
+        }
+    }
+
+    fs::path target_;
+    fs::path temporary_;
+    int descriptor_ = -1;
+    bool committed_ = false;
+};
+
+// Models must resolve inside an approved root; symbolic links are followed but
+// the destination still has to land inside one of those roots.
+bool resolve_model_path(
+    const std::string& requested,
+    const std::vector<fs::path>& roots,
+    fs::path& resolved,
+    std::string& reason) {
+    std::error_code error;
+    const fs::path canonical = fs::canonical(requested, error);
+    if (error) {
+        reason = "Model file does not exist or is not readable: " + requested;
+        return false;
+    }
+    if (!fs::is_regular_file(canonical, error) || error) {
+        reason = "Model path is not a regular file: " + requested;
+        return false;
+    }
+
+    for (const fs::path& root : roots) {
+        if (fs::is_directory(root, error) && path_is_within(canonical, root)) {
+            resolved = canonical;
+            return true;
+        }
+    }
+
+    std::string allowed;
+    for (const fs::path& root : roots) {
+        allowed += (allowed.empty() ? "" : ", ") + root.string();
+    }
+    reason = "Model is outside the approved directories (" + allowed +
+        "): " + requested + ". Pass --model-dir to approve another directory.";
+    return false;
+}
+
+// Defence in depth: every output must stay inside the data directory, and an
+// existing symbolic link at the destination is never overwritten.
+bool output_path_is_safe(const fs::path& path, const fs::path& root) {
+    if (!path_is_within(path, root)) {
+        report_error(ErrorCategory::FileSaving,
+            "Refusing to write outside the data directory: " + path.string());
+        return false;
+    }
+    std::error_code error;
+    if (fs::is_symlink(fs::symlink_status(path, error))) {
+        report_error(ErrorCategory::FileSaving,
+            "Refusing to overwrite a symbolic link: " + path.string());
+        return false;
+    }
+    return true;
+}
+
+void report_saved(const char* kind, const fs::path& path) {
+    std::cout << "SAVED|" << kind << '|' << path.string() << std::endl;
+}
+
 struct Recording {
     std::mutex mutex;
     std::vector<std::int16_t> samples;
@@ -384,53 +601,52 @@ void capture_dispatch_callback(ma_device* device, void* output, const void* inpu
     }
 }
 
-void write_little_endian(std::ofstream& file, std::uint32_t value) {
-    const char bytes[] = {
-        static_cast<char>(value & 0xff),
-        static_cast<char>((value >> 8) & 0xff),
-        static_cast<char>((value >> 16) & 0xff),
-        static_cast<char>((value >> 24) & 0xff)
-    };
-    file.write(bytes, sizeof(bytes));
+void append_little_endian(std::vector<char>& buffer, std::uint32_t value) {
+    buffer.push_back(static_cast<char>(value & 0xff));
+    buffer.push_back(static_cast<char>((value >> 8) & 0xff));
+    buffer.push_back(static_cast<char>((value >> 16) & 0xff));
+    buffer.push_back(static_cast<char>((value >> 24) & 0xff));
 }
 
-bool write_wav(const char* path, const std::vector<std::int16_t>& samples, std::uint32_t sample_rate) {
+bool write_wav(const fs::path& path, const std::vector<std::int16_t>& samples, std::uint32_t sample_rate) {
     constexpr std::uint32_t channels = 1;
     constexpr std::uint32_t bits_per_sample = 16;
-    if (sample_rate == 0 || channels == 0 || bits_per_sample != 16) {
+    constexpr std::uint32_t pcm_format = 1;
+    if (sample_rate == 0) {
         return false;
     }
     if (samples.size() > (std::numeric_limits<std::uint32_t>::max() - 36) / sizeof(std::int16_t)) {
         return false;
     }
 
-    std::ofstream file(path, std::ios::binary);
-    if (!file) {
+    const std::uint32_t data_size = static_cast<std::uint32_t>(samples.size() * sizeof(std::int16_t));
+    const std::uint32_t block_align = channels * bits_per_sample / 8;
+
+    std::vector<char> header;
+    header.reserve(44);
+    const char riff_tag[] = {'R', 'I', 'F', 'F'};
+    header.insert(header.end(), std::begin(riff_tag), std::end(riff_tag));
+    append_little_endian(header, 36 + data_size);
+    const char wave_tag[] = {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '};
+    header.insert(header.end(), std::begin(wave_tag), std::end(wave_tag));
+    append_little_endian(header, 16);
+    // Each pair below packs two 16-bit fields, low half first.
+    append_little_endian(header, (channels << 16) | pcm_format);
+    append_little_endian(header, sample_rate);
+    append_little_endian(header, sample_rate * block_align);
+    append_little_endian(header, (bits_per_sample << 16) | block_align);
+    const char data_tag[] = {'d', 'a', 't', 'a'};
+    header.insert(header.end(), std::begin(data_tag), std::end(data_tag));
+    append_little_endian(header, data_size);
+
+    AtomicFile file(path);
+    if (!file.open() || !file.write(header.data(), header.size())) {
         return false;
     }
-
-    const std::uint32_t data_size = static_cast<std::uint32_t>(samples.size() * sizeof(std::int16_t));
-    const std::uint32_t file_size = 36 + data_size;
-
-    file.write("RIFF", 4);
-    write_little_endian(file, file_size);
-    file.write("WAVEfmt ", 8);
-    write_little_endian(file, 16);
-    file.put(static_cast<char>(channels));
-    file.put(0);
-    file.put(1);
-    file.put(0);
-    write_little_endian(file, sample_rate);
-    write_little_endian(file, sample_rate * sizeof(std::int16_t));
-    file.put(static_cast<char>(channels * sizeof(std::int16_t)));
-    file.put(0);
-    file.put(static_cast<char>(bits_per_sample));
-    file.put(0);
-    file.write("data", 4);
-    write_little_endian(file, data_size);
-    file.write(reinterpret_cast<const char*>(samples.data()), data_size);
-
-    return file.good();
+    if (data_size > 0 && !file.write(samples.data(), data_size)) {
+        return false;
+    }
+    return file.commit();
 }
 
 struct SpeechSegment {
@@ -637,21 +853,23 @@ bool transcribe(
     whisper_context* context,
     const std::vector<std::int16_t>& samples,
     const std::vector<SpeechSegment>& segments,
-    int thread_count) {
+    int thread_count,
+    const fs::path& output_path) {
     TranscriptionResult result;
     if (!run_transcription(context, samples, segments, thread_count, result)) {
         return false;
     }
 
-    std::ofstream file("transcription.txt");
-    if (!file) {
-        report_error(ErrorCategory::FileSaving, "Could not save transcription.txt.");
+    const std::string text = result.text + "\n";
+    AtomicFile file(output_path);
+    if (!file.open() || !file.write(text.data(), text.size()) || !file.commit()) {
+        report_error(ErrorCategory::FileSaving,
+            "Could not save the transcription to " + output_path.string() + ".");
         return false;
     }
-    file << result.text << '\n';
 
     std::cout << "\nTranscription:\n" << result.text << std::endl;
-    std::cout << "Saved transcription.txt" << std::endl;
+    report_saved("TRANSCRIPT", output_path);
     std::cout << "Whisper processing time: " << result.milliseconds << " ms" << std::endl;
     return true;
 }
@@ -728,12 +946,14 @@ bool parse_options(
     bool& compare_mode,
     bool& streaming_mode,
     int& duration_seconds,
-    std::vector<std::string>& model_paths) {
+    std::vector<std::string>& model_paths,
+    std::vector<std::string>& model_directories) {
     thread_count = default_thread_count();
     compare_mode = false;
     streaming_mode = false;
     duration_seconds = 15;
     model_paths.clear();
+    model_directories.clear();
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -752,6 +972,12 @@ bool parse_options(
                 std::cerr << "Thread count must be a positive integer." << std::endl;
                 return false;
             }
+        } else if (argument == "--model-dir") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value after --model-dir." << std::endl;
+                return false;
+            }
+            model_directories.emplace_back(argv[++i]);
         } else if (argument == "--compare") {
             compare_mode = true;
         } else if (argument == "--stream") {
@@ -773,8 +999,13 @@ bool parse_options(
             }
         } else if (argument == "--help" || argument == "-h") {
             std::cout << "Usage:\n"
-                      << "  ./build/audio_to_text MODEL_PATH [--threads N] [--duration 15|45|60] [--stream]\n"
-                      << "  ./build/audio_to_text --compare MODEL_PATH MODEL_PATH ... [--threads N]"
+                      << "  ./build-release/audio_to_text_cli MODEL_PATH [--threads N]\n"
+                      << "      [--duration 15|45|60] [--stream] [--model-dir DIR]\n"
+                      << "  ./build-release/audio_to_text_cli --compare MODEL_PATH MODEL_PATH ...\n"
+                      << "      [--threads N] [--model-dir DIR]\n"
+                      << "\nModels must sit inside ./models, the application data directory,\n"
+                      << "or a directory approved with --model-dir.\n"
+                      << "Recordings and transcripts are written to the application data directory."
                       << std::endl;
             return false;
         } else if (!argument.empty() && argument[0] == '-') {
@@ -846,11 +1077,46 @@ int run(int argc, char** argv) {
     bool streaming_mode = false;
     int duration_seconds = 15;
     std::vector<std::string> model_paths;
-    if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, duration_seconds, model_paths)) {
+    std::vector<std::string> model_directories;
+    if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, duration_seconds,
+                       model_paths, model_directories)) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
     install_shutdown_handlers();
+
+    const fs::path data_directory = application_data_directory();
+    const fs::path recordings_directory = data_directory / "recordings";
+    const fs::path transcripts_directory = data_directory / "transcripts";
+    if (!ensure_private_directory(data_directory) ||
+        !ensure_private_directory(recordings_directory) ||
+        !ensure_private_directory(transcripts_directory)) {
+        report_error(ErrorCategory::FileSaving,
+            "Could not create the application data directory: " + data_directory.string());
+        return 1;
+    }
+    std::cout << "Data directory: " << data_directory.string() << std::endl;
+
+    std::vector<fs::path> model_roots{
+        fs::current_path() / "models",
+        data_directory / "models"
+    };
+    for (const std::string& directory : model_directories) {
+        model_roots.emplace_back(directory);
+    }
+
+    std::vector<std::string> approved_models;
+    approved_models.reserve(model_paths.size());
+    for (const std::string& requested : model_paths) {
+        fs::path approved;
+        std::string reason;
+        if (!resolve_model_path(requested, model_roots, approved, reason)) {
+            report_error(ErrorCategory::Model, reason);
+            return 1;
+        }
+        approved_models.push_back(approved.string());
+    }
+    model_paths = approved_models;
 
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
     std::cout << "CPU threads detected: " << (hardware_threads == 0 ? 1 : hardware_threads)
@@ -959,19 +1225,32 @@ int run(int argc, char** argv) {
                 " second limit; extra audio was discarded.");
         }
 
-        if (!write_wav("recording.wav", recording.samples, sample_rate)) {
-            report_error(ErrorCategory::FileSaving, "Could not save recording.wav.");
+        const std::string stamp = session_stamp();
+        const fs::path recording_path = recordings_directory / (stamp + "-recording.wav");
+        const fs::path cleaned_path = recordings_directory / (stamp + "-cleaned.wav");
+        const fs::path speech_path = recordings_directory / (stamp + "-speech.wav");
+        const fs::path transcript_path = transcripts_directory / (stamp + "-transcription.txt");
+        if (!output_path_is_safe(recording_path, data_directory) ||
+            !output_path_is_safe(cleaned_path, data_directory) ||
+            !output_path_is_safe(speech_path, data_directory) ||
+            !output_path_is_safe(transcript_path, data_directory)) {
             break;
         }
 
-        std::cout << "Saved recording.wav ("
+        if (!write_wav(recording_path, recording.samples, sample_rate)) {
+            report_error(ErrorCategory::FileSaving, "Could not save " + recording_path.string() + ".");
+            break;
+        }
+
+        report_saved("RECORDING", recording_path);
+        std::cout << "Recorded "
                   << recording.samples.size() / static_cast<double>(sample_rate)
-                  << " seconds)." << std::endl;
+                  << " seconds." << std::endl;
 
         const NoiseProfile noise_profile = measure_noise_floor(recording.samples, sample_rate);
         const std::vector<std::int16_t> cleaned_samples = reduce_noise(recording.samples, noise_profile);
-        if (!write_wav("cleaned.wav", cleaned_samples, sample_rate)) {
-            report_error(ErrorCategory::FileSaving, "Could not save cleaned.wav.");
+        if (!write_wav(cleaned_path, cleaned_samples, sample_rate)) {
+            report_error(ErrorCategory::FileSaving, "Could not save " + cleaned_path.string() + ".");
             break;
         }
 
@@ -981,7 +1260,7 @@ int run(int argc, char** argv) {
         std::cout << "Measured noise floor: " << noise_profile.noise_rms
                   << " RMS (" << noise_db << " dBFS), attenuation threshold: "
                   << noise_profile.attenuation_threshold << std::endl;
-        std::cout << "Saved cleaned.wav (speech length preserved)." << std::endl;
+        report_saved("CLEANED", cleaned_path);
 
         const auto vad_start = std::chrono::steady_clock::now();
         const std::vector<SpeechSegment> speech_segments = detect_speech_segments(recording.samples, sample_rate);
@@ -995,8 +1274,8 @@ int run(int argc, char** argv) {
 
         const std::vector<std::int16_t> speech = extract_speech(recording.samples, speech_segments);
         const std::vector<std::int16_t> cleaned_speech = extract_speech(cleaned_samples, speech_segments);
-        if (!write_wav("speech.wav", speech, sample_rate)) {
-            report_error(ErrorCategory::FileSaving, "Could not save speech.wav.");
+        if (!write_wav(speech_path, speech, sample_rate)) {
+            report_error(ErrorCategory::FileSaving, "Could not save " + speech_path.string() + ".");
             break;
         }
 
@@ -1005,7 +1284,8 @@ int run(int argc, char** argv) {
         const double reduction = raw_seconds > 0.0 ? (1.0 - speech_seconds / raw_seconds) * 100.0 : 0.0;
         std::cout << "Speech detected: " << speech_seconds << " seconds in "
                   << speech_segments.size() << " segment(s)." << std::endl;
-        std::cout << "Saved speech.wav. Removed " << reduction << "% of recorded audio."
+        report_saved("SPEECH", speech_path);
+        std::cout << "Removed " << reduction << "% of recorded audio."
                   << " VAD time: " << vad_ms << " ms" << std::endl;
 
         if (compare_mode) {
@@ -1014,7 +1294,7 @@ int run(int argc, char** argv) {
             }
         } else if (context) {
             const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
-            if (!transcribe(context.get(), speech, speech_range, thread_count)) {
+            if (!transcribe(context.get(), speech, speech_range, thread_count, transcript_path)) {
                 break;
             }
         }
