@@ -61,14 +61,18 @@ transcription.
 `View > Saved Transcripts` greys out until the worker finishes, and the recording
 shortcuts are inert while the library is showing.
 
-Each row offers, on right-click:
+Every row carries its own delete control, the small cross at its right edge.
+Deleting one transcript is offered where that transcript is, so it is always
+obvious which one would go. It asks for confirmation naming the date first, and
+the recording the transcript came from is kept: `File > Delete All Recordings`
+remains the only way to remove audio.
+
+Right-clicking a row additionally offers:
 
 - **Copy** and **Save a Copy** of the transcript being read
 - **Audio:** which recordings survive for that session, or `not kept` when
   retention was off or they have been deleted
-- **Delete This Transcript** — removes that one file after confirming. The
-  recording it came from is left alone; `File > Delete All Recordings` is still
-  the way to remove everything.
+- **Delete This Transcript** — the same action as the row control
 
 The list is rebuilt when a new transcript is saved and after deleting
 everything. With nothing stored it reads `No saved transcripts yet` rather than

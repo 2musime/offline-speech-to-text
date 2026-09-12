@@ -28,6 +28,7 @@
 #include <QTime>
 #include <QTextCursor>
 #include <QListWidget>
+#include <QToolButton>
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -168,7 +169,7 @@ public:
         history_list_->setAlternatingRowColors(true);
         history_list_->setContextMenuPolicy(Qt::CustomContextMenu);
         history_list_->setAccessibleName("Saved transcripts");
-        history_list_->setMinimumWidth(240);
+        history_list_->setMinimumWidth(300);
         history_list_->setUniformItemSizes(false);
         // Elide rather than scroll sideways: a horizontal scrollbar in a list
         // of previews is a worse way to read them than a trimmed line.
@@ -776,12 +777,50 @@ private:
                 ? QString("(no text)")
                 : QString::fromStdString(entry.preview);
             // The row is a label, not the transcript: keep it to one glance.
-            if (preview.size() > 48) {
-                preview = preview.left(48).trimmed() + "...";
+            if (preview.size() > 40) {
+                preview = preview.left(40).trimmed() + "...";
             }
-            auto* item = new QListWidgetItem(
-                QString("%1\n%2").arg(QString::fromUtf8(when), preview), history_list_);
+
+            auto* item = new QListWidgetItem(history_list_);
             item->setToolTip(QString::fromStdString(entry.path.string()));
+
+            auto* row = new QWidget(history_list_);
+            auto* row_layout = new QHBoxLayout(row);
+            row_layout->setContentsMargins(6, 4, 4, 4);
+
+            auto* text = new QVBoxLayout();
+            text->setSpacing(1);
+            auto* when_label = new QLabel(QString::fromUtf8(when), row);
+            auto* preview_label = new QLabel(preview, row);
+            preview_label->setEnabled(false);
+            // Ignored width: the labels must yield rather than push the delete
+            // control out of the row, which is what a natural width would do.
+            when_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            preview_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            text->addWidget(when_label);
+            text->addWidget(preview_label);
+            row_layout->addLayout(text, 1);
+
+            // Deleting one transcript is offered where that transcript is, so
+            // it is always obvious which one would go.
+            auto* remove = new QToolButton(row);
+            remove->setText("\u2715");
+            remove->setAutoRaise(true);
+            remove->setToolTip("Delete this transcript");
+            remove->setAccessibleName(QString("Delete transcript from %1").arg(QString::fromUtf8(when)));
+            row_layout->addWidget(remove);
+
+            // The path is captured by value: the row widget is destroyed and
+            // rebuilt on every refresh, so it must not outlive a reference.
+            const fs::path path = entry.path;
+            const QString label = QString::fromUtf8(when);
+            connect(remove, &QToolButton::clicked, this,
+                    [this, path, label] { delete_one_transcript(path, label); });
+
+            // Zero width lets the view use the viewport's, so the row never
+            // demands more room than the list has.
+            item->setSizeHint(QSize(0, row->sizeHint().height()));
+            history_list_->setItemWidget(item, row);
         }
         if (previous_row >= 0 && previous_row < history_list_->count()) {
             history_list_->setCurrentRow(previous_row);
@@ -820,6 +859,32 @@ private:
         saved_copy_->setEnabled(true);
     }
 
+    // Deletes a single transcript. The recording it came from is deliberately
+    // left alone: File > Delete All Recordings is the way to remove audio.
+    void delete_one_transcript(const fs::path& path, const QString& label) {
+        const auto choice = QMessageBox::question(this, "Delete transcript",
+            QString("Delete the transcript from %1?\n\nThe recording it came from is kept. "
+                    "This cannot be undone.").arg(label),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes) {
+            return;
+        }
+
+        std::string reason;
+        if (!delete_transcript(path, fs::path(data_directory_.toStdString()), reason)) {
+            QMessageBox::warning(this, "Could not delete", QString::fromStdString(reason));
+            return;
+        }
+
+        // Whatever was being read may be the file just removed.
+        saved_view_->clear();
+        saved_title_->setText("Select a transcript to read it");
+        saved_save_->setEnabled(false);
+        saved_copy_->setEnabled(false);
+        refresh_history();
+        statusBar()->showMessage("Transcript deleted", 3000);
+    }
+
     void show_history_menu(const QPoint& at) {
         const int row = history_list_->currentRow();
         if (row < 0 || row >= static_cast<int>(entries_.size())) {
@@ -844,20 +909,11 @@ private:
         audio_note->setEnabled(false);
 
         menu.addSeparator();
-        menu.addAction("&Delete This Transcript...", this, [this, entry, root] {
-            const auto choice = QMessageBox::question(this, "Delete transcript",
-                "Delete this transcript?\n\n" + QString::fromStdString(entry.path.filename().string()) +
-                "\n\nThe recording it came from is not deleted. This cannot be undone.",
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-            if (choice != QMessageBox::Yes) {
-                return;
-            }
-            std::string reason;
-            if (!delete_transcript(entry.path, root, reason)) {
-                QMessageBox::warning(this, "Could not delete", QString::fromStdString(reason));
-                return;
-            }
-            refresh_history();
+        menu.addAction("&Delete This Transcript...", this, [this, entry] {
+            char when[64];
+            std::tm shown = entry.stamp.when;
+            std::strftime(when, sizeof(when), "%d %b %Y, %H:%M", &shown);
+            delete_one_transcript(entry.path, QString::fromUtf8(when));
         });
         menu.exec(history_list_->mapToGlobal(at));
     }
