@@ -1,0 +1,18 @@
+# Describes the style this project already uses. Provided for editors.
+# Not enforced in CI: adopting it as a gate needs a one-time normalisation
+# commit, which should be its own change rather than part of a CI branch.
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++17
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ColumnLimit: 110
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+DerivePointerAlignment: false
+PointerAlignment: Left
+SpaceAfterTemplateKeyword: false
+SortIncludes: false

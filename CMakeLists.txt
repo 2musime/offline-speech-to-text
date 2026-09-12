@@ -13,6 +13,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(AUDIO_TO_TEXT_ENABLE_WARNINGS "Enable strict compiler warnings" ON)
 option(AUDIO_TO_TEXT_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)
+# Applied only to this project's targets; vendored Whisper is not held to it.
+option(AUDIO_TO_TEXT_WARNINGS_AS_ERRORS "Treat this project's warnings as errors" OFF)
 
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -46,16 +48,12 @@ target_link_libraries(audio_to_text PRIVATE
 )
 
 if(AUDIO_TO_TEXT_ENABLE_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(audio_to_text_cli PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-    )
-    target_compile_options(audio_to_text PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-    )
+    set(AUDIO_TO_TEXT_WARNING_FLAGS -Wall -Wextra -Wpedantic)
+    if(AUDIO_TO_TEXT_WARNINGS_AS_ERRORS)
+        list(APPEND AUDIO_TO_TEXT_WARNING_FLAGS -Werror)
+    endif()
+    target_compile_options(audio_to_text_cli PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
+    target_compile_options(audio_to_text PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
 endif()
 
 if(AUDIO_TO_TEXT_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -79,8 +77,8 @@ add_test(NAME gui COMMAND audio_to_text_gui_tests)
 add_test(NAME cli COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_tests.sh $<TARGET_FILE:audio_to_text_cli>)
 
 if(AUDIO_TO_TEXT_ENABLE_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(audio_to_text_unit_tests PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(audio_to_text_gui_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(audio_to_text_unit_tests PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
+    target_compile_options(audio_to_text_gui_tests PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
 endif()
 
 if(AUDIO_TO_TEXT_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

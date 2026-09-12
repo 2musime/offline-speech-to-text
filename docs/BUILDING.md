@@ -1,5 +1,22 @@
 # Building
 
+## Getting the source
+
+Whisper is a submodule, so clone with it:
+
+```bash
+git clone --recurse-submodules git@github.com:2musime/offline-speech-to-text.git
+```
+
+In an existing checkout that predates the submodule being registered:
+
+```bash
+git submodule update --init --recursive
+```
+
+Without this, `third_party/whisper.cpp` is empty and CMake fails at
+`add_subdirectory`.
+
 ## Dependencies
 
 On Fedora, install the compiler, CMake, and Qt6 development package:
@@ -50,6 +67,19 @@ Recordings are limited to 15 seconds by default. Choose a supported limit with
 The limit is enforced for both normal and streaming capture. Empty recordings,
 unsupported duration values, buffer overflow, and truncated recordings produce
 clear errors instead of unbounded memory growth.
+
+## Checks before pushing
+
+Everything the continuous integration workflow runs is available locally:
+
+```bash
+./tests/check_guarantees.sh        # nothing private tracked, no networking
+./tests/check_style.sh             # whitespace, line endings, line length
+ctest --test-dir build-release --output-on-failure
+```
+
+Add `-DAUDIO_TO_TEXT_WARNINGS_AS_ERRORS=ON` when configuring to match the
+compiler settings used in the workflow. See [CI.md](CI.md).
 
 ## Sanitizer build
 
