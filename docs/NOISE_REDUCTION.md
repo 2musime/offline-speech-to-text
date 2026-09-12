@@ -1,6 +1,8 @@
 # Noise reduction
 
-The recorder preserves the raw microphone input as `recording.wav` and writes a processed copy as `cleaned.wav`.
+The recorder preserves the raw microphone input and writes a processed copy
+alongside it. Both are stamped artefacts in the application data directory; see
+[FILE_STORAGE.md](FILE_STORAGE.md).
 
 ## Analysis
 
@@ -12,16 +14,18 @@ Noise reduction is intentionally conservative. Samples below the guarded thresho
 
 This is an amplitude gate, not a studio-quality spectral denoiser. It is appropriate as a first production-safe baseline. A later noise-reduction implementation should be evaluated against this baseline using the same recordings and reference transcripts.
 
-## Transcription comparison
+## Transcription
 
-In normal single-model mode, Whisper runs twice on the same VAD speech range:
+In normal single-model mode, Whisper runs **once**, on the raw speech extracted
+from `recording.wav`. The transcript and its processing time are printed, and
+the transcript is saved to `transcription.txt`.
 
-- original speech extracted from `recording.wav`
-- cleaned speech extracted from `cleaned.wav`
+The cleaned artefact is still produced as a diagnostic so the noise floor and
+attenuation can be inspected, but it is not transcribed in normal mode.
 
-Both transcripts and processing times are printed. The cleaned transcript is saved to `transcription.txt`.
-
-In `--compare` mode, each selected model also reports original and cleaned transcripts with separate processing times.
+In `--compare` mode, each selected model still reports original and cleaned
+transcripts with separate processing times, because that mode exists to measure
+the difference.
 
 Test with:
 

@@ -1,6 +1,13 @@
+#include "partial_text.h"
+#include "ui_state.h"
+#include "version.h"
+
 #include <QApplication>
 #include <QClipboard>
+#include <QCloseEvent>
+#include <QCheckBox>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFile>
 #include <QGroupBox>
@@ -10,6 +17,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QTimer>
 #include <QTime>
@@ -19,7 +27,7 @@
 class AudioToTextWindow final : public QMainWindow {
 public:
     AudioToTextWindow() {
-        setWindowTitle("Audio to Text");
+        setWindowTitle(QString("Audio to Text %1").arg(AUDIO_TO_TEXT_VERSION));
         resize(760, 560);
 
         auto* central = new QWidget(this);
@@ -27,8 +35,17 @@ public:
         auto* controls = new QHBoxLayout();
 
         model_selector_ = new QComboBox(central);
-        model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
+        // base.en first, so it is the default: it transcribes roughly 3.5x
+        // faster than small.en, which matters most on long recordings.
         model_selector_->addItem("Speed: base.en", "models/ggml-base.en.bin");
+        model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
+
+        duration_selector_ = new QComboBox(central);
+        duration_selector_->addItem("15 seconds", 15);
+        duration_selector_->addItem("45 seconds", 45);
+        duration_selector_->addItem("60 seconds", 60);
+        duration_selector_->addItem("5 minutes", 300);
+        duration_selector_->addItem("10 minutes", 600);
 
         start_button_ = new QPushButton("Start Recording", central);
         stop_button_ = new QPushButton("Stop Recording", central);
@@ -36,14 +53,47 @@ public:
 
         controls->addWidget(new QLabel("Model:", central));
         controls->addWidget(model_selector_, 1);
+        controls->addWidget(new QLabel("Limit:", central));
+        controls->addWidget(duration_selector_);
         controls->addWidget(start_button_);
         controls->addWidget(stop_button_);
         layout->addLayout(controls);
 
+        auto* input_controls = new QHBoxLayout();
+        device_selector_ = new QComboBox(central);
+        keep_audio_ = new QCheckBox("Keep audio files", central);
+        keep_audio_->setChecked(true);
+        keep_audio_->setToolTip("When off, audio is transcribed and discarded; no WAV file is written.");
+        privacy_button_ = new QPushButton("Privacy", central);
+        about_button_ = new QPushButton("About", central);
+        delete_button_ = new QPushButton("Delete recordings", central);
+
+        input_controls->addWidget(new QLabel("Microphone:", central));
+        input_controls->addWidget(device_selector_, 1);
+        input_controls->addWidget(keep_audio_);
+        input_controls->addWidget(privacy_button_);
+        input_controls->addWidget(about_button_);
+        input_controls->addWidget(delete_button_);
+        layout->addLayout(input_controls);
+
         status_label_ = new QLabel("Ready", central);
         duration_label_ = new QLabel("Duration: 00:00", central);
+        model_label_ = new QLabel("Model: not loaded", central);
+        input_label_ = new QLabel("Input: not selected", central);
+        storage_label_ = new QLabel("Saving to: not known yet", central);
+        storage_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        latency_label_ = new QLabel("", central);
+        progress_ = new QProgressBar(central);
+        progress_->setTextVisible(false);
+        progress_->setRange(0, 100);
+        progress_->setValue(0);
         layout->addWidget(status_label_);
         layout->addWidget(duration_label_);
+        layout->addWidget(model_label_);
+        layout->addWidget(input_label_);
+        layout->addWidget(storage_label_);
+        layout->addWidget(latency_label_);
+        layout->addWidget(progress_);
 
         transcript_ = new QPlainTextEdit(central);
         transcript_->setPlaceholderText("Transcription will appear here...");
@@ -65,54 +115,166 @@ public:
         process_->setProcessChannelMode(QProcess::MergedChannels);
         timer_ = new QTimer(this);
         timer_->setInterval(250);
+        limit_timer_ = new QTimer(this);
+        limit_timer_->setSingleShot(true);
+        // Refreshes the elapsed figure while a long transcription runs, so the
+        // display keeps moving between chunk reports.
+        processing_timer_ = new QTimer(this);
+        processing_timer_->setInterval(1000);
+
+        populate_devices();
 
         connect(start_button_, &QPushButton::clicked, this, [this] { start_recording(); });
-        connect(stop_button_, &QPushButton::clicked, this, [this] { stop_recording(); });
+        connect(stop_button_, &QPushButton::clicked, this, [this] {
+            if (state_ == UiState::Recording) {
+                stop_recording();
+            } else {
+                cancel_work();
+            }
+        });
         connect(copy_button_, &QPushButton::clicked, this, [this] {
             QApplication::clipboard()->setText(transcript_->toPlainText());
         });
         connect(save_button_, &QPushButton::clicked, this, [this] { save_transcript(); });
+        connect(privacy_button_, &QPushButton::clicked, this, [this] { show_privacy_notice(); });
+        connect(about_button_, &QPushButton::clicked, this, [this] { show_about(); });
+        connect(delete_button_, &QPushButton::clicked, this, [this] { delete_recordings(); });
         connect(process_, &QProcess::readyRead, this, [this] { consume_worker_output(); });
-        connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-            set_idle("Worker error: " + process_->errorString());
+        connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+            if (closing_ || error == QProcess::Crashed) {
+                return;
+            }
+            set_failed("Audio worker problem: " + process_->errorString());
         });
         connect(process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
-                this, [this](int, QProcess::ExitStatus) { set_idle("Ready"); });
-        connect(timer_, &QTimer::timeout, this, [this] {
-            const int seconds = started_at_.secsTo(QTime::currentTime());
-            duration_label_->setText("Duration: " + QTime(0, 0).addSecs(seconds).toString("mm:ss"));
+                this, [this](int exit_code, QProcess::ExitStatus status) { handle_worker_exit(exit_code, status); });
+        connect(timer_, &QTimer::timeout, this, [this] { refresh_elapsed(); });
+        connect(processing_timer_, &QTimer::timeout, this, [this] { report_transcription_progress(); });
+        connect(limit_timer_, &QTimer::timeout, this, [this] {
+            if (state_ != UiState::Recording) {
+                return;
+            }
+            set_status("Recording limit reached; finishing...");
+            stop_recording();
         });
+
+        apply_state(UiState::Ready);
     }
 
 private:
     void start_recording() {
+        // Only these states may begin a recording, so a second click, a stray
+        // shortcut, or a timer cannot start a concurrent worker.
+        if (!ui_state_may_start(state_)) {
+            return;
+        }
         if (process_->state() != QProcess::NotRunning) {
             return;
         }
 
         transcript_->clear();
+        final_transcription_.clear();
+        transcript_path_.clear();
+        model_label_->setText("Model: validating...");
+        input_label_->setText("Input: opening...");
+        latency_label_->clear();
+        partial_words_.clear();
+        partial_trimmed_ = false;
+        completed_ = false;
+        error_shown_ = false;
+        cancelled_ = false;
+        chunks_done_ = 0;
+        chunks_total_ = 0;
         const QString model = model_selector_->currentData().toString();
-        process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
-                        {model, "--stream", "--threads", "4"});
-        if (!process_->waitForStarted(1000)) {
-            set_idle("Could not start the audio worker.");
+        const QString duration = duration_selector_->currentData().toString();
+        // No --threads: the worker's measured default is the single source of truth.
+        QStringList arguments{model, "--stream", "--duration", duration};
+        if (!keep_audio_->isChecked()) {
+            arguments << "--no-retain-audio";
+        }
+        const int device = device_selector_->currentData().toInt();
+        if (device >= 0) {
+            arguments << "--device" << QString::number(device);
+        }
+        limit_seconds_ = duration_selector_->currentData().toInt();
+        // No waitForStarted: blocking here would freeze the window. The state
+        // stays LoadingModel until the worker says it is ready.
+        process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", arguments);
+        apply_state(UiState::LoadingModel);
+        set_status("Loading model...");
+    }
+
+    // The worker has validated the model, opened the device, and is waiting.
+    // Recording, and the clock, start here rather than at the button press.
+    void begin_recording() {
+        if (state_ != UiState::LoadingModel) {
             return;
         }
         process_->write("\n");
-        start_button_->setEnabled(false);
-        stop_button_->setEnabled(true);
-        model_selector_->setEnabled(false);
-        started_at_ = QTime::currentTime();
+        elapsed_.start();
         timer_->start();
+        limit_timer_->start(limit_seconds_ * 1000);
+        apply_state(UiState::Recording);
         set_status("Recording");
+        refresh_elapsed();
+    }
+
+    // Shows how much is done and how long it has taken, so a long wait reads
+    // as work rather than as a freeze.
+    void report_transcription_progress() {
+        if (state_ != UiState::Processing || chunks_total_ <= 0) {
+            return;
+        }
+        progress_->setRange(0, chunks_total_);
+        progress_->setValue(chunks_done_);
+
+        const qint64 seconds = processing_elapsed_.isValid() ? processing_elapsed_.elapsed() / 1000 : 0;
+        QString status = QString("Transcribing %1 of %2").arg(chunks_done_).arg(chunks_total_);
+        if (seconds > 0) {
+            status += QString(" (%1s elapsed").arg(seconds);
+            // Once a chunk is done the remainder can be estimated honestly.
+            if (chunks_done_ > 0 && chunks_done_ < chunks_total_) {
+                const qint64 remaining = seconds * (chunks_total_ - chunks_done_) / chunks_done_;
+                status += QString(", about %1s left").arg(remaining);
+            }
+            status += ")";
+        }
+        set_status(status);
+    }
+
+    // Abandons whatever the worker is doing. Available while loading, stopping
+    // and transcribing, so no phase is a dead end.
+    void cancel_work() {
+        if (!ui_state_is_busy(state_)) {
+            return;
+        }
+        timer_->stop();
+        limit_timer_->stop();
+        processing_timer_->stop();
+        set_status("Cancelling...");
+        if (process_->state() != QProcess::NotRunning) {
+            process_->write("q\n");
+            if (!process_->waitForFinished(2000)) {
+                process_->kill();
+                process_->waitForFinished(1000);
+            }
+        }
+        cancelled_ = true;
+        apply_state(UiState::Ready);
+        set_status("Cancelled. Start recording to try again.");
     }
 
     void stop_recording() {
+        if (state_ != UiState::Recording) {
+            return;
+        }
         if (process_->state() == QProcess::Running) {
             process_->write("\n");
-            set_status("Finishing transcription...");
-            stop_button_->setEnabled(false);
         }
+        timer_->stop();
+        limit_timer_->stop();
+        apply_state(UiState::Stopping);
+        set_status("Finishing recording...");
     }
 
     void consume_worker_output() {
@@ -131,88 +293,366 @@ private:
             return;
         }
 
-        if (!pending_text_label_.isEmpty()) {
-            if (pending_text_label_ == "partial") {
-                append_partial_text(line);
-            } else {
-                transcript_->setPlainText(line);
-            }
-            pending_text_label_.clear();
+        if (line.startsWith("ERROR|") || line.startsWith("WARN|")) {
+            handle_worker_report(line);
             return;
         }
 
-        if (line.startsWith("Partial (")) {
-            pending_text_label_ = "partial";
+        if (line.startsWith("SAVED|")) {
+            handle_saved_line(line);
             return;
         }
-        if (line.startsWith("Original transcription (")) {
-            pending_text_label_ = "final";
+
+        if (line.startsWith("MODEL|")) {
+            handle_model_line(line);
             return;
         }
-        if (line.startsWith("Cleaned transcription (")) {
-            pending_text_label_ = "final";
+
+        if (line.startsWith("INPUT|")) {
+            input_label_->setText("Input: " + line.section('|', 1));
             return;
         }
-        if (line == "Transcription:") {
-            pending_text_label_ = "final";
+
+        if (line.startsWith("PARTIAL|")) {
+            const QStringList parts = line.split('|');
+            if (parts.size() >= 4) {
+                append_partial_text(parts.mid(3).join('|'),
+                                    parts.at(1).toLongLong(), parts.at(2).toDouble());
+            }
             return;
         }
-        if (line.contains("Saved cleaned transcription")) {
-            save_button_->setEnabled(true);
-            copy_button_->setEnabled(true);
-            set_status("Transcription complete");
-            process_->write("q\n");
+
+        if (line.startsWith("FINAL|")) {
+            final_transcription_ = line.section('|', 1);
+            render_final_transcription();
+            // Completion is keyed off the transcription itself, not off a file
+            // being written, so it still works when retention is off.
+            completed_ = true;
+            processing_timer_->stop();
+            apply_state(UiState::Completed);
+            set_status(QString("Transcription complete (%1s)")
+                .arg(processing_elapsed_.isValid() ? processing_elapsed_.elapsed() / 1000 : 0));
+            if (process_->state() == QProcess::Running) {
+                process_->write("q\n");
+            }
             return;
         }
-        if (line.contains("Could not open the microphone")) {
-            set_idle("Microphone error: could not open the microphone.");
+
+        if (line.startsWith("DATADIR|")) {
+            data_directory_ = line.section('|', 1);
+            storage_label_->setText("Saving to: " + data_directory_);
             return;
         }
-        if (line.contains("Could not load Whisper model")) {
-            set_idle("Model error: could not load the selected model.");
+
+        if (line.startsWith("PROGRESS|")) {
+            const QStringList parts = line.split('|');
+            if (parts.size() >= 3) {
+                chunks_done_ = parts.at(1).toInt();
+                chunks_total_ = parts.at(2).toInt();
+                report_transcription_progress();
+            }
+            return;
+        }
+
+        if (line.startsWith("STREAMSTATS|")) {
+            handle_stream_stats(line);
+            return;
+        }
+
+        if (line.startsWith("READY|")) {
+            // Emitted at every prompt; only the first one starts a recording.
+            begin_recording();
+            return;
+        }
+
+        if (line.startsWith("PROCESSING|")) {
+            if (state_ == UiState::Stopping || state_ == UiState::Recording) {
+                timer_->stop();
+                limit_timer_->stop();
+                chunks_done_ = 0;
+                chunks_total_ = 0;
+                processing_elapsed_.start();
+                processing_timer_->start();
+                apply_state(UiState::Processing);
+                set_status("Preparing audio...");
+            }
+            return;
+        }
+
+    }
+
+    // The single place any control's enabled state is decided.
+    void apply_state(UiState state) {
+        state_ = state;
+
+        const bool has_text = !transcript_->toPlainText().trimmed().isEmpty();
+        const ControlStates controls = controls_for(state, devices_ready_, has_text);
+        start_button_->setEnabled(controls.start);
+        stop_button_->setEnabled(controls.stop || controls.cancel);
+        stop_button_->setText(controls.cancel ? "Cancel" : "Stop Recording");
+        model_selector_->setEnabled(controls.model);
+        duration_selector_->setEnabled(controls.duration);
+        device_selector_->setEnabled(controls.device);
+        keep_audio_->setEnabled(controls.keep_audio);
+        delete_button_->setEnabled(controls.delete_recordings);
+        save_button_->setEnabled(controls.save);
+        copy_button_->setEnabled(controls.copy);
+
+        if (controls.progress_indeterminate) {
+            // The worker gives no completion fraction for these phases.
+            progress_->setRange(0, 0);
+        } else if (state == UiState::Recording) {
+            progress_->setRange(0, limit_seconds_ > 0 ? limit_seconds_ : 100);
+        } else if (state == UiState::Processing) {
+            // Filled in by PROGRESS| reports; start indeterminate only until
+            // the first one arrives.
+            progress_->setRange(0, chunks_total_ > 0 ? chunks_total_ : 0);
+            progress_->setValue(chunks_done_);
+        } else {
+            progress_->setRange(0, 100);
+            progress_->setValue(0);
         }
     }
 
-    void append_partial_text(const QString& incoming) {
-        const QString addition = incoming.trimmed();
-        if (addition.isEmpty()) {
+    void refresh_elapsed() {
+        if (state_ != UiState::Recording) {
+            return;
+        }
+        // Monotonic: unaffected by clock changes or midnight rollover.
+        const qint64 seconds = elapsed_.elapsed() / 1000;
+        duration_label_->setText(QString("Duration: %1 of %2")
+            .arg(QTime(0, 0).addSecs(static_cast<int>(seconds)).toString("mm:ss"),
+                 QTime(0, 0).addSecs(limit_seconds_).toString("mm:ss")));
+        progress_->setValue(static_cast<int>(qMin<qint64>(seconds, limit_seconds_)));
+    }
+
+    // Asks the worker to enumerate capture devices before any recording starts.
+    void populate_devices() {
+        device_selector_->addItem("System default", -1);
+        device_selector_->setEnabled(false);
+
+        // Enumeration runs asynchronously; blocking here froze the window for
+        // as long as the audio backend took to answer.
+        auto* probe = new QProcess(this);
+        connect(probe, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                [this, probe](int, QProcess::ExitStatus) {
+            add_enumerated_devices(QString::fromUtf8(probe->readAllStandardOutput()));
+            probe->deleteLater();
+        });
+        connect(probe, &QProcess::errorOccurred, this, [this, probe](QProcess::ProcessError) {
+            devices_ready_ = true;
+            apply_state(state_);
+            probe->deleteLater();
+        });
+        probe->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", {"--list-devices"});
+    }
+
+    void add_enumerated_devices(const QString& output) {
+        const QStringList lines = output.split('\n');
+        for (const QString& line : lines) {
+            if (!line.startsWith("DEVICE|")) {
+                continue;
+            }
+            const QStringList parts = line.split('|');
+            if (parts.size() < 4) {
+                continue;
+            }
+            const int index = parts.at(1).toInt();
+            const QString name = parts.mid(3).join('|').trimmed();
+            const bool is_default = parts.at(2) == "default";
+            device_selector_->addItem(is_default ? name + " (default)" : name, index);
+        }
+        devices_ready_ = true;
+        apply_state(state_);
+    }
+
+    // The worker reports the validated model as MODEL|variant|language|bytes|path.
+    void handle_model_line(const QString& line) {
+        const QStringList parts = line.split('|');
+        if (parts.size() < 5) {
             return;
         }
 
-        QString current = transcript_->toPlainText().trimmed();
-        if (current.isEmpty()) {
-            transcript_->setPlainText(addition);
+        const QString variant = parts.at(1);
+        const QString language = parts.at(2) == "multilingual" ? "multilingual" : "English-only";
+        const double megabytes = parts.at(3).toDouble() / (1024.0 * 1024.0);
+        model_label_->setText(QString("Model: %1, %2, %3 MB")
+            .arg(variant, language, QString::number(megabytes, 'f', 1)));
+    }
+
+    // The worker announces each artefact as SAVED|KIND|path.
+    void handle_saved_line(const QString& line) {
+        const QStringList parts = line.split('|');
+        if (parts.size() < 3 || parts.at(1) != "TRANSCRIPT") {
             return;
         }
 
-        int best_length = 0;
-        int best_position = 0;
-        const int maximum_overlap = qMin(80, current.size());
-        for (int length = maximum_overlap; length >= 4; --length) {
-            const QString suffix = current.right(length);
-            const int position = addition.indexOf(suffix, 0, Qt::CaseInsensitive);
-            if (position >= 0 && position <= 40) {
-                best_length = length;
-                best_position = position;
-                break;
-            }
+        transcript_path_ = parts.mid(2).join('|');
+        storage_label_->setText("Saved to: " + transcript_path_);
+    }
+
+    // Worker reports arrive as SEVERITY|CATEGORY|message.
+    void handle_worker_report(const QString& line) {
+        const QStringList parts = line.split('|');
+        if (parts.size() < 3) {
+            return;
         }
 
-        QString new_text = current;
-        if (best_length > 0) {
-            const QString remainder = addition.mid(best_position + best_length).trimmed();
-            if (!remainder.isEmpty()) {
-                new_text += current.endsWith(' ') ? remainder : " " + remainder;
-            }
-        } else {
-            new_text += current.endsWith(' ') ? addition : " " + addition;
+        const QString severity = parts.at(0);
+        const QString category = parts.at(1);
+        const QString message = parts.mid(2).join('|');
+
+        if (severity == "WARN") {
+            set_status(message);
+            return;
         }
-        transcript_->setPlainText(new_text);
+
+        error_shown_ = true;
+        set_failed(actionable_message(category, message));
+        if (process_->state() == QProcess::Running) {
+            process_->write("q\n");
+        }
+    }
+
+    static QString actionable_message(const QString& category, const QString& message) {
+        if (category == "MICROPHONE") {
+            return message + " Check that a microphone is connected and that this application may use it.";
+        }
+        if (category == "MODEL") {
+            return message + " Download the model into models/ and select it again.";
+        }
+        if (category == "RECORDING") {
+            return message + " Speak closer to the microphone and record again.";
+        }
+        if (category == "TRANSCRIPTION") {
+            return message + " Try the base.en model, or record a shorter clip.";
+        }
+        if (category == "FILE_SAVING") {
+            return message + " Check free disk space and write permissions for the working directory.";
+        }
+        return message;
+    }
+
+    void handle_worker_exit(int exit_code, QProcess::ExitStatus status) {
+        if (closing_) {
+            return;
+        }
+        if (cancelled_) {
+            // We asked it to stop, and may have killed it. That is not a crash,
+            // and the message already on screen is the accurate one.
+            return;
+        }
+        if (error_shown_) {
+            // Stay in Error: the reported cause remains on screen, and any text
+            // that did arrive stays saveable.
+            set_failed(status_label_->text());
+            return;
+        }
+        if (status == QProcess::CrashExit) {
+            set_failed("The audio worker stopped unexpectedly. Start recording to try again.");
+            return;
+        }
+        if (exit_code != 0) {
+            set_failed("The audio worker exited with code " + QString::number(exit_code) + ".");
+            return;
+        }
+        set_idle(completed_ ? "Transcription complete" : "Ready");
+    }
+
+    void append_partial_text(const QString& incoming, qint64 latency_ms, double queue_seconds) {
+        latency_label_->setText(QString("Partial latency: %1 ms, %2 s behind live")
+            .arg(latency_ms).arg(QString::number(queue_seconds, 'f', 1)));
+
+        partial_text::append_with_overlap(partial_words_, incoming,
+            maximum_overlap_words, maximum_partial_words, partial_trimmed_);
+        render_partial_text();
+    }
+
+    void render_partial_text() {
+        const QString body = partial_words_.join(' ');
+        transcript_->setPlainText(partial_trimmed_ ? "[earlier text trimmed] " + body : body);
         transcript_->moveCursor(QTextCursor::End);
     }
 
+    void handle_stream_stats(const QString& line) {
+        int dropped = 0;
+        int rate_limited = 0;
+        for (const QString& field : line.split('|')) {
+            if (field.startsWith("dropped=")) {
+                dropped = field.section('=', 1).toInt();
+            } else if (field.startsWith("rate_limited=")) {
+                rate_limited = field.section('=', 1).toInt();
+            }
+        }
+        if (dropped > 0 || rate_limited > 0) {
+            latency_label_->setText(QString("Live text skipped %1 window(s); the final "
+                                            "transcription covers everything")
+                .arg(dropped + rate_limited));
+        }
+    }
+
+    void show_about() {
+        QMessageBox::about(this, "About Audio to Text",
+            QString("<b>Audio to Text %1</b><br>"
+                    "Build %2, %3<br><br>"
+                    "Offline speech to text. Audio never leaves this computer.<br><br>"
+                    "Transcription by whisper.cpp, audio capture by miniaudio, "
+                    "interface built with Qt 6.")
+                .arg(AUDIO_TO_TEXT_VERSION, AUDIO_TO_TEXT_GIT_COMMIT, AUDIO_TO_TEXT_BUILD_TYPE));
+    }
+
+    void show_privacy_notice() {
+        QMessageBox::information(this, "Privacy",
+            "Audio is captured, analysed and transcribed entirely on this computer.\n\n"
+            "Whisper runs locally against a model file on disk. No audio, transcript or "
+            "metadata is uploaded, and neither this window nor the worker it runs opens a "
+            "network connection.\n\n"
+            "Saved to:\n" + (data_directory_.isEmpty() ? QString("(shown once a recording starts)")
+                                                       : data_directory_) + "\n\n"
+            "Files are created readable only by you. Nothing is written to a log file.\n\n"
+            "Turn off \"Keep audio files\" to transcribe without keeping any WAV file. "
+            "\"Delete recordings\" removes every stored recording and transcript.");
+    }
+
+    void delete_recordings() {
+        const auto choice = QMessageBox::question(this, "Delete recordings",
+            "Delete every stored recording and transcript?\n\nThis cannot be undone.",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes) {
+            return;
+        }
+
+        QProcess cleaner;
+        cleaner.start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
+                      {"--delete-recordings"});
+        if (!cleaner.waitForFinished(10000)) {
+            cleaner.kill();
+            cleaner.waitForFinished(1000);
+            QMessageBox::warning(this, "Delete recordings", "The deletion did not finish.");
+            return;
+        }
+
+        const QStringList lines = QString::fromUtf8(cleaner.readAllStandardOutput()).split('\n');
+        for (const QString& line : lines) {
+            if (!line.startsWith("DELETED|")) {
+                continue;
+            }
+            const QStringList parts = line.split('|');
+            if (parts.size() >= 3) {
+                QMessageBox::information(this, "Delete recordings",
+                    QString("Deleted %1 file(s), %2 MB.")
+                        .arg(parts.at(1))
+                        .arg(QString::number(parts.at(2).toDouble() / (1024.0 * 1024.0), 'f', 1)));
+                transcript_path_.clear();
+                return;
+            }
+        }
+        QMessageBox::warning(this, "Delete recordings", "Nothing was reported as deleted.");
+    }
+
     void save_transcript() {
-        const QString path = QFileDialog::getSaveFileName(this, "Save transcription", "transcription.txt");
+        const QString suggested = transcript_path_.isEmpty() ? QString("transcription.txt") : transcript_path_;
+        const QString path = QFileDialog::getSaveFileName(this, "Save a copy of the transcription", suggested);
         if (path.isEmpty()) {
             return;
         }
@@ -224,31 +664,98 @@ private:
         file.write(transcript_->toPlainText().toUtf8());
     }
 
+    void render_final_transcription() {
+        if (final_transcription_.isEmpty()) {
+            return;
+        }
+        transcript_->setPlainText(final_transcription_);
+        transcript_->moveCursor(QTextCursor::End);
+    }
+
+    void closeEvent(QCloseEvent* event) override {
+        if (ui_state_is_busy(state_)) {
+            const auto choice = QMessageBox::question(this, "Recording in progress",
+                "A recording is still being transcribed. Closing now discards it.\n\nClose anyway?",
+                QMessageBox::Close | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (choice != QMessageBox::Close) {
+                event->ignore();
+                return;
+            }
+        }
+
+        closing_ = true;
+        timer_->stop();
+        limit_timer_->stop();
+        if (process_->state() != QProcess::NotRunning) {
+            process_->write("q\n");
+            if (!process_->waitForFinished(3000)) {
+                process_->kill();
+                process_->waitForFinished(1000);
+            }
+        }
+        QMainWindow::closeEvent(event);
+    }
+
     void set_status(const QString& status) {
         status_label_->setText(status);
     }
 
     void set_idle(const QString& status) {
         timer_->stop();
-        start_button_->setEnabled(true);
-        stop_button_->setEnabled(false);
-        model_selector_->setEnabled(true);
+        limit_timer_->stop();
+        apply_state(completed_ ? UiState::Completed : UiState::Ready);
+        set_status(status);
+    }
+
+    void set_failed(const QString& status) {
+        timer_->stop();
+        limit_timer_->stop();
+        apply_state(UiState::Error);
         set_status(status);
     }
 
     QComboBox* model_selector_;
+    QComboBox* duration_selector_;
+    QComboBox* device_selector_;
     QPushButton* start_button_;
     QPushButton* stop_button_;
     QPushButton* save_button_;
     QPushButton* copy_button_;
     QLabel* status_label_;
     QLabel* duration_label_;
+    QLabel* model_label_;
+    QLabel* input_label_;
+    QLabel* latency_label_;
+    QProgressBar* progress_;
+    QLabel* storage_label_;
+    QCheckBox* keep_audio_;
+    QPushButton* privacy_button_;
+    QPushButton* about_button_;
+    QPushButton* delete_button_;
+    QString data_directory_;
     QPlainTextEdit* transcript_;
     QProcess* process_;
     QTimer* timer_;
-    QTime started_at_;
+    QTimer* limit_timer_;
+    QTimer* processing_timer_;
+    QElapsedTimer elapsed_;
+    UiState state_ = UiState::Ready;
+    int limit_seconds_ = 0;
+    bool devices_ready_ = false;
     QString output_buffer_;
-    QString pending_text_label_;
+    QString final_transcription_;
+    QStringList partial_words_;
+    bool partial_trimmed_ = false;
+    static constexpr int maximum_partial_words = 3000;
+    static constexpr int maximum_overlap_words = 40;
+    QString transcript_path_;
+    bool completed_ = false;
+    bool closing_ = false;
+    bool error_shown_ = false;
+    bool cancelled_ = false;
+    int chunks_done_ = 0;
+    int chunks_total_ = 0;
+    QElapsedTimer processing_elapsed_;
 };
 
 int main(int argc, char* argv[]) {

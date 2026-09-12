@@ -1,0 +1,6 @@
+#!/bin/bash
+# Refuses a push when the quick gates fail. Enable with:
+#   git config core.hooksPath .githooks
+# Skip once with:
+#   git push --no-verify
+exec "$(git rev-parse --show-toplevel)/tests/run_gates.sh" --quick
