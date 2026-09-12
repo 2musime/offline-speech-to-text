@@ -30,12 +30,19 @@ public:
         model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
         model_selector_->addItem("Speed: base.en", "models/ggml-base.en.bin");
 
+        duration_selector_ = new QComboBox(central);
+        duration_selector_->addItem("15 seconds", 15);
+        duration_selector_->addItem("45 seconds", 45);
+        duration_selector_->addItem("60 seconds", 60);
+
         start_button_ = new QPushButton("Start Recording", central);
         stop_button_ = new QPushButton("Stop Recording", central);
         stop_button_->setEnabled(false);
 
         controls->addWidget(new QLabel("Model:", central));
         controls->addWidget(model_selector_, 1);
+        controls->addWidget(new QLabel("Limit:", central));
+        controls->addWidget(duration_selector_);
         controls->addWidget(start_button_);
         controls->addWidget(stop_button_);
         layout->addLayout(controls);
@@ -65,6 +72,8 @@ public:
         process_->setProcessChannelMode(QProcess::MergedChannels);
         timer_ = new QTimer(this);
         timer_->setInterval(250);
+        limit_timer_ = new QTimer(this);
+        limit_timer_->setSingleShot(true);
 
         connect(start_button_, &QPushButton::clicked, this, [this] { start_recording(); });
         connect(stop_button_, &QPushButton::clicked, this, [this] { stop_recording(); });
@@ -82,6 +91,10 @@ public:
             const int seconds = started_at_.secsTo(QTime::currentTime());
             duration_label_->setText("Duration: " + QTime(0, 0).addSecs(seconds).toString("mm:ss"));
         });
+        connect(limit_timer_, &QTimer::timeout, this, [this] {
+            set_status("Recording limit reached; stopping recording...");
+            stop_recording();
+        });
     }
 
 private:
@@ -91,9 +104,12 @@ private:
         }
 
         transcript_->clear();
+        original_transcription_.clear();
+        cleaned_transcription_.clear();
         const QString model = model_selector_->currentData().toString();
+        const QString duration = duration_selector_->currentData().toString();
         process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
-                        {model, "--stream", "--threads", "4"});
+                {model, "--stream", "--threads", "4", "--duration", duration});
         if (!process_->waitForStarted(1000)) {
             set_idle("Could not start the audio worker.");
             return;
@@ -102,8 +118,10 @@ private:
         start_button_->setEnabled(false);
         stop_button_->setEnabled(true);
         model_selector_->setEnabled(false);
+        duration_selector_->setEnabled(false);
         started_at_ = QTime::currentTime();
         timer_->start();
+        limit_timer_->start(duration_selector_->currentData().toInt() * 1000);
         set_status("Recording");
     }
 
@@ -134,6 +152,12 @@ private:
         if (!pending_text_label_.isEmpty()) {
             if (pending_text_label_ == "partial") {
                 append_partial_text(line);
+            } else if (pending_text_label_ == "original") {
+                original_transcription_ = line;
+                render_final_transcription();
+            } else if (pending_text_label_ == "cleaned" || pending_text_label_ == "final") {
+                cleaned_transcription_ = line;
+                render_final_transcription();
             } else {
                 transcript_->setPlainText(line);
             }
@@ -146,15 +170,19 @@ private:
             return;
         }
         if (line.startsWith("Original transcription (")) {
-            pending_text_label_ = "final";
+            pending_text_label_ = "original";
             return;
         }
         if (line.startsWith("Cleaned transcription (")) {
-            pending_text_label_ = "final";
+            pending_text_label_ = "cleaned";
             return;
         }
         if (line == "Transcription:") {
             pending_text_label_ = "final";
+            return;
+        }
+        if (line.contains("Recording reached the") && line.contains("second limit")) {
+            set_status("Recording stopped at the selected limit; processing...");
             return;
         }
         if (line.contains("Saved cleaned transcription")) {
@@ -224,19 +252,39 @@ private:
         file.write(transcript_->toPlainText().toUtf8());
     }
 
+    void render_final_transcription() {
+        QString text;
+        if (!original_transcription_.isEmpty()) {
+            text += "What you said:\n" + original_transcription_;
+        }
+        if (!cleaned_transcription_.isEmpty()) {
+            if (!text.isEmpty()) {
+                text += "\n\n";
+            }
+            text += "Cleaned version:\n" + cleaned_transcription_;
+        }
+        if (!text.isEmpty()) {
+            transcript_->setPlainText(text);
+            transcript_->moveCursor(QTextCursor::End);
+        }
+    }
+
     void set_status(const QString& status) {
         status_label_->setText(status);
     }
 
     void set_idle(const QString& status) {
         timer_->stop();
+        limit_timer_->stop();
         start_button_->setEnabled(true);
         stop_button_->setEnabled(false);
         model_selector_->setEnabled(true);
+        duration_selector_->setEnabled(true);
         set_status(status);
     }
 
     QComboBox* model_selector_;
+    QComboBox* duration_selector_;
     QPushButton* start_button_;
     QPushButton* stop_button_;
     QPushButton* save_button_;
@@ -246,9 +294,12 @@ private:
     QPlainTextEdit* transcript_;
     QProcess* process_;
     QTimer* timer_;
+    QTimer* limit_timer_;
     QTime started_at_;
     QString output_buffer_;
     QString pending_text_label_;
+    QString original_transcription_;
+    QString cleaned_transcription_;
 };
 
 int main(int argc, char* argv[]) {

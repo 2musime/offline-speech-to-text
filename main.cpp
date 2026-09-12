@@ -25,6 +25,8 @@
 struct Recording {
     std::mutex mutex;
     std::vector<std::int16_t> samples;
+    std::size_t maximum_samples = 0;
+    std::atomic<bool> limit_reached{false};
 };
 
 class AudioRingBuffer {
@@ -76,12 +78,14 @@ private:
 struct StreamingCapture {
     AudioRingBuffer buffer;
     std::vector<std::int16_t> all_samples;
+    std::size_t maximum_samples;
     std::atomic<std::size_t> total_samples{0};
     std::atomic<bool> recording{false};
     std::atomic<bool> finished{false};
     std::atomic<bool> overflowed{false};
 
-    explicit StreamingCapture(std::size_t capacity) : buffer(capacity), all_samples(capacity) {}
+    explicit StreamingCapture(std::size_t capacity)
+        : buffer(capacity), all_samples(capacity), maximum_samples(capacity) {}
 
     void reset() {
         buffer.reset();
@@ -89,6 +93,7 @@ struct StreamingCapture {
         recording.store(false, std::memory_order_release);
         finished.store(false, std::memory_order_release);
         overflowed.store(false, std::memory_order_release);
+        maximum_samples = all_samples.size();
     }
 };
 
@@ -107,7 +112,14 @@ void capture_callback(ma_device* device, void*, const void* input, ma_uint32 fra
     const auto* samples = static_cast<const std::int16_t*>(input);
 
     std::lock_guard<std::mutex> lock(recording->mutex);
-    recording->samples.insert(recording->samples.end(), samples, samples + frame_count);
+    const std::size_t remaining = recording->maximum_samples > recording->samples.size()
+        ? recording->maximum_samples - recording->samples.size()
+        : 0;
+    const std::size_t count = std::min<std::size_t>(frame_count, remaining);
+    recording->samples.insert(recording->samples.end(), samples, samples + count);
+    if (count != frame_count) {
+        recording->limit_reached.store(true, std::memory_order_release);
+    }
 }
 
 void streaming_capture_callback(ma_device* device, void*, const void* input, ma_uint32 frame_count) {
@@ -119,12 +131,16 @@ void streaming_capture_callback(ma_device* device, void*, const void* input, ma_
     auto* capture = state->streaming;
     const auto* samples = static_cast<const std::int16_t*>(input);
     const std::size_t offset = capture->total_samples.fetch_add(frame_count, std::memory_order_relaxed);
-    if (offset + frame_count <= capture->all_samples.size()) {
-        std::copy(samples, samples + frame_count, capture->all_samples.begin() + offset);
+    const std::size_t remaining = offset < capture->maximum_samples
+        ? capture->maximum_samples - offset
+        : 0;
+    const std::size_t count = std::min<std::size_t>(frame_count, remaining);
+    if (count > 0) {
+        std::copy(samples, samples + count, capture->all_samples.begin() + offset);
     } else {
         capture->overflowed.store(true, std::memory_order_release);
     }
-    if (capture->buffer.write(samples, frame_count) != frame_count) {
+    if (count != frame_count || capture->buffer.write(samples, count) != count) {
         capture->overflowed.store(true, std::memory_order_release);
     }
 }
@@ -149,6 +165,15 @@ void write_little_endian(std::ofstream& file, std::uint32_t value) {
 }
 
 bool write_wav(const char* path, const std::vector<std::int16_t>& samples, std::uint32_t sample_rate) {
+    constexpr std::uint32_t channels = 1;
+    constexpr std::uint32_t bits_per_sample = 16;
+    if (sample_rate == 0 || channels == 0 || bits_per_sample != 16) {
+        return false;
+    }
+    if (samples.size() > (std::numeric_limits<std::uint32_t>::max() - 36) / sizeof(std::int16_t)) {
+        return false;
+    }
+
     std::ofstream file(path, std::ios::binary);
     if (!file) {
         return false;
@@ -161,15 +186,15 @@ bool write_wav(const char* path, const std::vector<std::int16_t>& samples, std::
     write_little_endian(file, file_size);
     file.write("WAVEfmt ", 8);
     write_little_endian(file, 16);
-    file.put(1);
+    file.put(static_cast<char>(channels));
     file.put(0);
     file.put(1);
     file.put(0);
     write_little_endian(file, sample_rate);
     write_little_endian(file, sample_rate * sizeof(std::int16_t));
-    file.put(sizeof(std::int16_t));
+    file.put(static_cast<char>(channels * sizeof(std::int16_t)));
     file.put(0);
-    file.put(16);
+    file.put(static_cast<char>(bits_per_sample));
     file.put(0);
     file.write("data", 4);
     write_little_endian(file, data_size);
@@ -501,10 +526,12 @@ bool parse_options(
     int& thread_count,
     bool& compare_mode,
     bool& streaming_mode,
+    int& duration_seconds,
     std::vector<std::string>& model_paths) {
     thread_count = default_thread_count();
     compare_mode = false;
     streaming_mode = false;
+    duration_seconds = 15;
     model_paths.clear();
 
     for (int i = 1; i < argc; ++i) {
@@ -528,9 +555,24 @@ bool parse_options(
             compare_mode = true;
         } else if (argument == "--stream") {
             streaming_mode = true;
+        } else if (argument == "--duration") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value after --duration." << std::endl;
+                return false;
+            }
+            try {
+                duration_seconds = std::stoi(argv[++i]);
+            } catch (const std::exception&) {
+                std::cerr << "Duration must be 15, 45, or 60 seconds." << std::endl;
+                return false;
+            }
+            if (duration_seconds != 15 && duration_seconds != 45 && duration_seconds != 60) {
+                std::cerr << "Duration must be 15, 45, or 60 seconds." << std::endl;
+                return false;
+            }
         } else if (argument == "--help" || argument == "-h") {
             std::cout << "Usage:\n"
-                      << "  ./build/audio_to_text MODEL_PATH [--threads N] [--stream]\n"
+                      << "  ./build/audio_to_text MODEL_PATH [--threads N] [--duration 15|45|60] [--stream]\n"
                       << "  ./build/audio_to_text --compare MODEL_PATH MODEL_PATH ... [--threads N]"
                       << std::endl;
             return false;
@@ -603,14 +645,16 @@ int main(int argc, char** argv) {
     int thread_count = 0;
     bool compare_mode = false;
     bool streaming_mode = false;
+    int duration_seconds = 15;
     std::vector<std::string> model_paths;
-    if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, model_paths)) {
+    if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, duration_seconds, model_paths)) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
     std::cout << "CPU threads detected: " << (hardware_threads == 0 ? 1 : hardware_threads)
-              << ", Whisper threads: " << thread_count << std::endl;
+              << ", Whisper threads: " << thread_count
+              << ", recording limit: " << duration_seconds << " seconds" << std::endl;
 
     whisper_context* context = nullptr;
     if (!compare_mode) {
@@ -632,7 +676,9 @@ int main(int argc, char** argv) {
     config.capture.format = ma_format_s16;
     config.capture.channels = 1;
     config.sampleRate = sample_rate;
-    StreamingCapture streaming_capture(sample_rate * 600);
+    const std::size_t maximum_samples = static_cast<std::size_t>(sample_rate) * duration_seconds;
+    recording.maximum_samples = maximum_samples;
+    StreamingCapture streaming_capture(maximum_samples);
     CaptureState capture_state{&recording, &streaming_capture};
     config.dataCallback = capture_dispatch_callback;
     config.pUserData = &capture_state;
@@ -654,7 +700,9 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lock(recording.mutex);
             recording.samples.clear();
+            recording.samples.reserve(recording.maximum_samples);
         }
+        recording.limit_reached.store(false, std::memory_order_release);
 
         if (streaming_mode) {
             streaming_capture.reset();
@@ -679,6 +727,10 @@ int main(int argc, char** argv) {
             recording.samples.assign(
                 streaming_capture.all_samples.begin(),
                 streaming_capture.all_samples.begin() + sample_count);
+            if (streaming_capture.overflowed.load(std::memory_order_acquire)) {
+                std::cerr << "Recording reached its limit or the streaming buffer overflowed; audio was truncated."
+                          << std::endl;
+            }
         } else {
             if (ma_device_start(&device) != MA_SUCCESS) {
                 std::cerr << "Could not start recording." << std::endl;
@@ -688,6 +740,15 @@ int main(int argc, char** argv) {
             std::cout << "Recording... Press Enter to stop." << std::endl;
             std::getline(std::cin, command);
             ma_device_stop(&device);
+        }
+
+        if (recording.samples.empty()) {
+            std::cerr << "No audio was captured. Check the microphone and try again." << std::endl;
+            continue;
+        }
+        if (recording.limit_reached.load(std::memory_order_acquire)) {
+            std::cerr << "Recording reached the " << duration_seconds
+                      << " second limit; extra audio was discarded." << std::endl;
         }
 
         if (!write_wav("recording.wav", recording.samples, sample_rate)) {

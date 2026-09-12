@@ -28,6 +28,7 @@ From the project root:
 The GUI provides:
 
 - `base.en` and `small.en` model selection
+- 15, 45, and 60 second recording limits
 - Start and Stop Recording controls
 - recording duration
 - recording and transcription status
