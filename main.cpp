@@ -3,6 +3,7 @@
 #include "whisper.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <chrono>
 #include <cmath>
@@ -26,16 +27,115 @@ struct Recording {
     std::vector<std::int16_t> samples;
 };
 
+class AudioRingBuffer {
+public:
+    explicit AudioRingBuffer(std::size_t capacity)
+        : samples_(capacity), write_position_(0), read_position_(0) {}
+
+    std::size_t write(const std::int16_t* input, std::size_t count) {
+        const std::size_t write_position = write_position_.load(std::memory_order_relaxed);
+        const std::size_t read_position = read_position_.load(std::memory_order_acquire);
+        const std::size_t available = samples_.size() - (write_position - read_position);
+        const std::size_t written = std::min(count, available);
+        for (std::size_t i = 0; i < written; ++i) {
+            samples_[(write_position + i) % samples_.size()] = input[i];
+        }
+        write_position_.store(write_position + written, std::memory_order_release);
+        return written;
+    }
+
+    std::size_t read(std::vector<std::int16_t>& output, std::size_t count) {
+        const std::size_t read_position = read_position_.load(std::memory_order_relaxed);
+        const std::size_t write_position = write_position_.load(std::memory_order_acquire);
+        const std::size_t available = write_position - read_position;
+        const std::size_t read_count = std::min(count, available);
+        output.resize(read_count);
+        for (std::size_t i = 0; i < read_count; ++i) {
+            output[i] = samples_[(read_position + i) % samples_.size()];
+        }
+        read_position_.store(read_position + read_count, std::memory_order_release);
+        return read_count;
+    }
+
+    std::size_t available() const {
+        return write_position_.load(std::memory_order_acquire) -
+            read_position_.load(std::memory_order_acquire);
+    }
+
+    void reset() {
+        write_position_.store(0, std::memory_order_release);
+        read_position_.store(0, std::memory_order_release);
+    }
+
+private:
+    std::vector<std::int16_t> samples_;
+    std::atomic<std::size_t> write_position_;
+    std::atomic<std::size_t> read_position_;
+};
+
+struct StreamingCapture {
+    AudioRingBuffer buffer;
+    std::vector<std::int16_t> all_samples;
+    std::atomic<std::size_t> total_samples{0};
+    std::atomic<bool> recording{false};
+    std::atomic<bool> finished{false};
+    std::atomic<bool> overflowed{false};
+
+    explicit StreamingCapture(std::size_t capacity) : buffer(capacity), all_samples(capacity) {}
+
+    void reset() {
+        buffer.reset();
+        total_samples.store(0, std::memory_order_release);
+        recording.store(false, std::memory_order_release);
+        finished.store(false, std::memory_order_release);
+        overflowed.store(false, std::memory_order_release);
+    }
+};
+
+struct CaptureState {
+    Recording* recording;
+    StreamingCapture* streaming;
+};
+
 void capture_callback(ma_device* device, void*, const void* input, ma_uint32 frame_count) {
     if (input == nullptr) {
         return;
     }
 
-    auto* recording = static_cast<Recording*>(device->pUserData);
+    auto* state = static_cast<CaptureState*>(device->pUserData);
+    auto* recording = state->recording;
     const auto* samples = static_cast<const std::int16_t*>(input);
 
     std::lock_guard<std::mutex> lock(recording->mutex);
     recording->samples.insert(recording->samples.end(), samples, samples + frame_count);
+}
+
+void streaming_capture_callback(ma_device* device, void*, const void* input, ma_uint32 frame_count) {
+    if (input == nullptr) {
+        return;
+    }
+
+    auto* state = static_cast<CaptureState*>(device->pUserData);
+    auto* capture = state->streaming;
+    const auto* samples = static_cast<const std::int16_t*>(input);
+    const std::size_t offset = capture->total_samples.fetch_add(frame_count, std::memory_order_relaxed);
+    if (offset + frame_count <= capture->all_samples.size()) {
+        std::copy(samples, samples + frame_count, capture->all_samples.begin() + offset);
+    } else {
+        capture->overflowed.store(true, std::memory_order_release);
+    }
+    if (capture->buffer.write(samples, frame_count) != frame_count) {
+        capture->overflowed.store(true, std::memory_order_release);
+    }
+}
+
+void capture_dispatch_callback(ma_device* device, void* output, const void* input, ma_uint32 frame_count) {
+    auto* state = static_cast<CaptureState*>(device->pUserData);
+    if (state->streaming->recording.load(std::memory_order_acquire)) {
+        streaming_capture_callback(device, output, input, frame_count);
+    } else {
+        capture_callback(device, output, input, frame_count);
+    }
 }
 
 void write_little_endian(std::ofstream& file, std::uint32_t value) {
@@ -227,6 +327,18 @@ struct TranscriptionResult {
     long long milliseconds;
 };
 
+long long process_cpu_milliseconds() {
+#ifdef __linux__
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        const auto user_us = usage.ru_utime.tv_sec * 1000000LL + usage.ru_utime.tv_usec;
+        const auto system_us = usage.ru_stime.tv_sec * 1000000LL + usage.ru_stime.tv_usec;
+        return (user_us + system_us) / 1000;
+    }
+#endif
+    return 0;
+}
+
 bool run_transcription(
     whisper_context* context,
     const std::vector<std::int16_t>& samples,
@@ -289,6 +401,52 @@ bool transcribe(
     return true;
 }
 
+void streaming_worker(
+    StreamingCapture& capture,
+    whisper_context* context,
+    int thread_count,
+    std::uint32_t sample_rate) {
+    constexpr std::size_t window_seconds = 5;
+    constexpr std::size_t stride_seconds = 4;
+    const std::size_t window_size = sample_rate * window_seconds;
+    const std::size_t stride_size = sample_rate * stride_seconds;
+    std::vector<std::int16_t> pending;
+    std::vector<std::int16_t> incoming;
+    pending.reserve(window_size + stride_size);
+    const long long cpu_start = process_cpu_milliseconds();
+
+    while (!capture.finished.load(std::memory_order_acquire) || capture.buffer.available() > 0) {
+        if (capture.buffer.read(incoming, sample_rate / 10) > 0) {
+            pending.insert(pending.end(), incoming.begin(), incoming.end());
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        while (pending.size() >= window_size) {
+            const auto start = std::chrono::steady_clock::now();
+            std::vector<std::int16_t> window(pending.begin(), pending.begin() + window_size);
+            TranscriptionResult result;
+            const std::vector<SpeechSegment> range{{0, window.size()}};
+            if (!run_transcription(context, window, range, thread_count, result)) {
+                std::cerr << "Streaming transcription failed for an audio window." << std::endl;
+                return;
+            }
+            const auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            std::cout << "\nPartial (window ending at " << window_seconds
+                      << "s, latency " << latency << " ms):\n"
+                      << result.text << std::endl;
+            pending.erase(pending.begin(), pending.begin() + stride_size);
+        }
+    }
+
+    if (capture.overflowed.load(std::memory_order_acquire)) {
+        std::cerr << "Streaming buffer overflowed; audio was dropped." << std::endl;
+    }
+    std::cout << "Streaming worker CPU time: "
+              << process_cpu_milliseconds() - cpu_start << " ms" << std::endl;
+}
+
 bool compare_transcription(
     whisper_context* context,
     const std::vector<std::int16_t>& original,
@@ -342,9 +500,11 @@ bool parse_options(
     char** argv,
     int& thread_count,
     bool& compare_mode,
+    bool& streaming_mode,
     std::vector<std::string>& model_paths) {
     thread_count = default_thread_count();
     compare_mode = false;
+    streaming_mode = false;
     model_paths.clear();
 
     for (int i = 1; i < argc; ++i) {
@@ -366,9 +526,11 @@ bool parse_options(
             }
         } else if (argument == "--compare") {
             compare_mode = true;
+        } else if (argument == "--stream") {
+            streaming_mode = true;
         } else if (argument == "--help" || argument == "-h") {
             std::cout << "Usage:\n"
-                      << "  ./build/audio_to_text MODEL_PATH [--threads N]\n"
+                      << "  ./build/audio_to_text MODEL_PATH [--threads N] [--stream]\n"
                       << "  ./build/audio_to_text --compare MODEL_PATH MODEL_PATH ... [--threads N]"
                       << std::endl;
             return false;
@@ -440,8 +602,9 @@ int main(int argc, char** argv) {
 
     int thread_count = 0;
     bool compare_mode = false;
+    bool streaming_mode = false;
     std::vector<std::string> model_paths;
-    if (!parse_options(argc, argv, thread_count, compare_mode, model_paths)) {
+    if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, model_paths)) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
@@ -459,12 +622,20 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (compare_mode && streaming_mode) {
+        std::cerr << "--stream cannot be combined with --compare." << std::endl;
+        whisper_free(context);
+        return 1;
+    }
+
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
     config.capture.format = ma_format_s16;
     config.capture.channels = 1;
     config.sampleRate = sample_rate;
-    config.dataCallback = capture_callback;
-    config.pUserData = &recording;
+    StreamingCapture streaming_capture(sample_rate * 600);
+    CaptureState capture_state{&recording, &streaming_capture};
+    config.dataCallback = capture_dispatch_callback;
+    config.pUserData = &capture_state;
 
     ma_device device;
     if (ma_device_init(nullptr, &config, &device) != MA_SUCCESS) {
@@ -485,14 +656,39 @@ int main(int argc, char** argv) {
             recording.samples.clear();
         }
 
-        if (ma_device_start(&device) != MA_SUCCESS) {
-            std::cerr << "Could not start recording." << std::endl;
-            break;
-        }
+        if (streaming_mode) {
+            streaming_capture.reset();
+            streaming_capture.recording.store(true, std::memory_order_release);
+            if (ma_device_start(&device) != MA_SUCCESS) {
+                streaming_capture.recording.store(false, std::memory_order_release);
+                std::cerr << "Could not start recording." << std::endl;
+                break;
+            }
 
-        std::cout << "Recording... Press Enter to stop." << std::endl;
-        std::getline(std::cin, command);
-        ma_device_stop(&device);
+            std::thread worker(streaming_worker, std::ref(streaming_capture), context, thread_count, sample_rate);
+            std::cout << "Streaming recording... Press Enter to stop." << std::endl;
+            std::getline(std::cin, command);
+            streaming_capture.recording.store(false, std::memory_order_release);
+            ma_device_stop(&device);
+            streaming_capture.finished.store(true, std::memory_order_release);
+            worker.join();
+
+            const std::size_t sample_count = std::min(
+                streaming_capture.total_samples.load(std::memory_order_acquire),
+                streaming_capture.all_samples.size());
+            recording.samples.assign(
+                streaming_capture.all_samples.begin(),
+                streaming_capture.all_samples.begin() + sample_count);
+        } else {
+            if (ma_device_start(&device) != MA_SUCCESS) {
+                std::cerr << "Could not start recording." << std::endl;
+                break;
+            }
+
+            std::cout << "Recording... Press Enter to stop." << std::endl;
+            std::getline(std::cin, command);
+            ma_device_stop(&device);
+        }
 
         if (!write_wav("recording.wav", recording.samples, sample_rate)) {
             std::cerr << "Could not save recording.wav." << std::endl;
