@@ -12,18 +12,27 @@ set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/whisper.cpp)
 
 find_package(Threads REQUIRED)
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-add_executable(audio_to_text
+add_executable(audio_to_text_cli
     main.cpp
 )
 
-target_include_directories(audio_to_text PRIVATE
+target_include_directories(audio_to_text_cli PRIVATE
     third_party
 )
 
-target_link_libraries(audio_to_text PRIVATE
+target_link_libraries(audio_to_text_cli PRIVATE
     whisper
     Threads::Threads
     ${CMAKE_DL_LIBS}
     m
+)
+
+add_executable(audio_to_text
+    gui_main.cpp
+)
+
+target_link_libraries(audio_to_text PRIVATE
+    Qt6::Widgets
 )
