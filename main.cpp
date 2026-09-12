@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -15,6 +16,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef __linux__
+#include <sys/resource.h>
+#endif
 
 struct Recording {
     std::mutex mutex;
@@ -166,11 +171,17 @@ std::vector<std::int16_t> extract_speech(
     return speech;
 }
 
-bool transcribe(
+struct TranscriptionResult {
+    std::string text;
+    long long milliseconds;
+};
+
+bool run_transcription(
     whisper_context* context,
     const std::vector<std::int16_t>& samples,
     const std::vector<SpeechSegment>& segments,
-    int thread_count) {
+    int thread_count,
+    TranscriptionResult& result) {
     std::string transcription;
     const auto transcription_start = std::chrono::steady_clock::now();
     for (const SpeechSegment& segment : segments) {
@@ -198,18 +209,32 @@ bool transcribe(
         }
     }
 
+    result.text = transcription;
+    result.milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - transcription_start).count();
+    return true;
+}
+
+bool transcribe(
+    whisper_context* context,
+    const std::vector<std::int16_t>& samples,
+    const std::vector<SpeechSegment>& segments,
+    int thread_count) {
+    TranscriptionResult result;
+    if (!run_transcription(context, samples, segments, thread_count, result)) {
+        return false;
+    }
+
     std::ofstream file("transcription.txt");
     if (!file) {
         std::cerr << "Could not save transcription.txt." << std::endl;
         return false;
     }
-    file << transcription << '\n';
+    file << result.text << '\n';
 
-    std::cout << "\nTranscription:\n" << transcription << std::endl;
+    std::cout << "\nTranscription:\n" << result.text << std::endl;
     std::cout << "Saved transcription.txt" << std::endl;
-    const auto transcription_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - transcription_start).count();
-    std::cout << "Whisper processing time: " << transcription_ms << " ms" << std::endl;
+    std::cout << "Whisper processing time: " << result.milliseconds << " ms" << std::endl;
     return true;
 }
 
@@ -221,9 +246,25 @@ int default_thread_count() {
     return static_cast<int>(hardware_threads - 1);
 }
 
-bool parse_thread_count(int argc, char** argv, int& thread_count, const char*& model_path) {
+long peak_memory_kb() {
+#ifdef __linux__
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return usage.ru_maxrss;
+    }
+#endif
+    return 0;
+}
+
+bool parse_options(
+    int argc,
+    char** argv,
+    int& thread_count,
+    bool& compare_mode,
+    std::vector<std::string>& model_paths) {
     thread_count = default_thread_count();
-    model_path = nullptr;
+    compare_mode = false;
+    model_paths.clear();
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -242,15 +283,66 @@ bool parse_thread_count(int argc, char** argv, int& thread_count, const char*& m
                 std::cerr << "Thread count must be a positive integer." << std::endl;
                 return false;
             }
+        } else if (argument == "--compare") {
+            compare_mode = true;
         } else if (argument == "--help" || argument == "-h") {
-            std::cout << "Usage: ./build/audio_to_text MODEL_PATH [--threads N]" << std::endl;
+            std::cout << "Usage:\n"
+                      << "  ./build/audio_to_text MODEL_PATH [--threads N]\n"
+                      << "  ./build/audio_to_text --compare MODEL_PATH MODEL_PATH ... [--threads N]"
+                      << std::endl;
             return false;
-        } else if (model_path == nullptr) {
-            model_path = argv[i];
+        } else if (!argument.empty() && argument[0] == '-') {
+            std::cerr << "Unknown option: " << argument << std::endl;
+            return false;
         } else {
-            std::cerr << "Unknown argument: " << argument << std::endl;
+            model_paths.push_back(argument);
+        }
+    }
+
+    if (model_paths.empty() && !compare_mode) {
+        model_paths.emplace_back("models/ggml-base.en.bin");
+    }
+    if (!compare_mode && model_paths.size() > 1) {
+        std::cerr << "Use --compare to test multiple models." << std::endl;
+        return false;
+    }
+    if (compare_mode && model_paths.size() < 2) {
+        std::cerr << "--compare requires at least two model paths." << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool compare_models(
+    const std::vector<std::string>& model_paths,
+    const std::vector<std::int16_t>& samples,
+    const std::vector<SpeechSegment>& segments,
+    int thread_count) {
+    std::cout << "\nModel comparison (same audio and VAD segments):\n";
+    for (const std::string& model_path : model_paths) {
+        whisper_context_params context_params = whisper_context_default_params();
+        whisper_context* context = whisper_init_from_file_with_params(model_path.c_str(), context_params);
+        if (context == nullptr) {
+            std::cerr << "Could not load Whisper model: " << model_path << std::endl;
             return false;
         }
+
+        TranscriptionResult result;
+        const bool success = run_transcription(context, samples, segments, thread_count, result);
+        const long memory_kb = peak_memory_kb();
+        whisper_free(context);
+        if (!success) {
+            return false;
+        }
+
+        std::error_code error;
+        const auto model_size = std::filesystem::file_size(model_path, error);
+        const double model_size_mb = error ? 0.0 : model_size / (1024.0 * 1024.0);
+        std::cout << "\nModel: " << model_path
+                  << "\n  Size: " << model_size_mb << " MB"
+                  << "\n  Processing time: " << result.milliseconds << " ms"
+                  << "\n  Peak memory: " << memory_kb << " KB"
+                  << "\n  Transcription: " << result.text << std::endl;
     }
     return true;
 }
@@ -260,8 +352,9 @@ int main(int argc, char** argv) {
     Recording recording;
 
     int thread_count = 0;
-    const char* model_path = nullptr;
-    if (!parse_thread_count(argc, argv, thread_count, model_path)) {
+    bool compare_mode = false;
+    std::vector<std::string> model_paths;
+    if (!parse_options(argc, argv, thread_count, compare_mode, model_paths)) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
@@ -270,11 +363,11 @@ int main(int argc, char** argv) {
               << ", Whisper threads: " << thread_count << std::endl;
 
     whisper_context* context = nullptr;
-    if (model_path != nullptr) {
+    if (!compare_mode) {
         whisper_context_params context_params = whisper_context_default_params();
-        context = whisper_init_from_file_with_params(model_path, context_params);
+        context = whisper_init_from_file_with_params(model_paths[0].c_str(), context_params);
         if (context == nullptr) {
-            std::cerr << "Could not load Whisper model: " << model_path << std::endl;
+            std::cerr << "Could not load Whisper model: " << model_paths[0] << std::endl;
             return 1;
         }
     }
@@ -347,7 +440,11 @@ int main(int argc, char** argv) {
         std::cout << "Saved speech.wav. Removed " << reduction << "% of recorded audio."
                   << " VAD time: " << vad_ms << " ms" << std::endl;
 
-        if (context != nullptr && !transcribe(context, recording.samples, speech_segments, thread_count)) {
+        if (compare_mode) {
+            if (!compare_models(model_paths, recording.samples, speech_segments, thread_count)) {
+                break;
+            }
+        } else if (context != nullptr && !transcribe(context, recording.samples, speech_segments, thread_count)) {
             break;
         }
     }
