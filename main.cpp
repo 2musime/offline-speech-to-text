@@ -858,6 +858,105 @@ bool write_wav(const fs::path& path, const std::vector<std::int16_t>& samples, s
     return file.commit();
 }
 
+// Minimal RIFF/WAVE reader for benchmark input. Deliberately strict: the
+// recorder's own format only, so a mismatch is reported instead of silently
+// producing a meaningless measurement.
+bool read_wav(
+    const fs::path& path,
+    std::vector<std::int16_t>& samples,
+    std::uint32_t expected_sample_rate,
+    std::string& reason) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        reason = "Could not open the audio file: " + path.string();
+        return false;
+    }
+
+    char riff[12];
+    if (!file.read(riff, sizeof(riff)) ||
+        std::memcmp(riff, "RIFF", 4) != 0 ||
+        std::memcmp(riff + 8, "WAVE", 4) != 0) {
+        reason = "Not a RIFF/WAVE file: " + path.string();
+        return false;
+    }
+
+    const auto read_u32 = [&file](std::uint32_t& value) {
+        char bytes[4];
+        if (!file.read(bytes, sizeof(bytes))) {
+            return false;
+        }
+        std::memcpy(&value, bytes, sizeof(value));
+        return true;
+    };
+    const auto read_u16 = [&file](std::uint16_t& value) {
+        char bytes[2];
+        if (!file.read(bytes, sizeof(bytes))) {
+            return false;
+        }
+        std::memcpy(&value, bytes, sizeof(value));
+        return true;
+    };
+
+    bool have_format = false;
+    std::uint16_t channels = 0;
+    std::uint16_t bits_per_sample = 0;
+    std::uint32_t sample_rate = 0;
+
+    while (true) {
+        char id[4];
+        std::uint32_t chunk_size = 0;
+        if (!file.read(id, sizeof(id)) || !read_u32(chunk_size)) {
+            break;
+        }
+
+        if (std::memcmp(id, "fmt ", 4) == 0 && chunk_size >= 16) {
+            std::uint16_t format = 0;
+            std::uint32_t byte_rate = 0;
+            std::uint16_t block_align = 0;
+            if (!read_u16(format) || !read_u16(channels) || !read_u32(sample_rate) ||
+                !read_u32(byte_rate) || !read_u16(block_align) || !read_u16(bits_per_sample)) {
+                reason = "Truncated format chunk: " + path.string();
+                return false;
+            }
+            if (format != 1) {
+                reason = "Only uncompressed PCM is supported: " + path.string();
+                return false;
+            }
+            have_format = true;
+            file.seekg(chunk_size - 16, std::ios::cur);
+        } else if (std::memcmp(id, "data", 4) == 0) {
+            if (!have_format) {
+                reason = "Data chunk appears before the format chunk: " + path.string();
+                return false;
+            }
+            if (channels != 1 || bits_per_sample != 16 || sample_rate != expected_sample_rate) {
+                reason = "Expected mono 16-bit PCM at " + std::to_string(expected_sample_rate) +
+                    " Hz but found " + std::to_string(channels) + " channel(s), " +
+                    std::to_string(bits_per_sample) + "-bit at " + std::to_string(sample_rate) +
+                    " Hz: " + path.string();
+                return false;
+            }
+
+            samples.resize(chunk_size / sizeof(std::int16_t));
+            if (samples.empty()) {
+                reason = "The audio file contains no samples: " + path.string();
+                return false;
+            }
+            if (!file.read(reinterpret_cast<char*>(samples.data()),
+                           static_cast<std::streamsize>(chunk_size))) {
+                reason = "Truncated audio data: " + path.string();
+                return false;
+            }
+            return true;
+        } else {
+            file.seekg(chunk_size + (chunk_size & 1), std::ios::cur);
+        }
+    }
+
+    reason = "No data chunk found: " + path.string();
+    return false;
+}
+
 struct SpeechSegment {
     std::size_t begin;
     std::size_t end;
@@ -1019,19 +1118,39 @@ long long process_cpu_milliseconds() {
     return 0;
 }
 
+// Holds the float conversion buffer across calls. Whisper wants float samples
+// and the recorder produces 16-bit ones, so this conversion happens for every
+// segment of every recording; without reuse each one allocated twice.
+struct TranscriptionWorkspace {
+    std::vector<float> audio;
+};
+
+long peak_memory_kb() {
+#ifdef __linux__
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return usage.ru_maxrss;
+    }
+#endif
+    return 0;
+}
+
 bool run_transcription(
     whisper_context* context,
     const std::vector<std::int16_t>& samples,
     const std::vector<SpeechSegment>& segments,
     int thread_count,
+    TranscriptionWorkspace& workspace,
     TranscriptionResult& result) {
     std::string transcription;
     const auto transcription_start = std::chrono::steady_clock::now();
     for (const SpeechSegment& segment : segments) {
-        const std::vector<std::int16_t> chunk(samples.begin() + segment.begin, samples.begin() + segment.end);
-        std::vector<float> audio(chunk.size());
-        for (std::size_t i = 0; i < chunk.size(); ++i) {
-            audio[i] = static_cast<float>(chunk[i]) / 32768.0f;
+        // Convert straight out of the source range: no intermediate copy, and
+        // resize keeps whatever capacity the previous segment left behind.
+        const std::size_t count = segment.end - segment.begin;
+        workspace.audio.resize(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            workspace.audio[i] = static_cast<float>(samples[segment.begin + i]) / 32768.0f;
         }
 
         whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -1042,7 +1161,7 @@ bool run_transcription(
         params.language = "en";
         params.n_threads = thread_count;
 
-        if (whisper_full(context, params, audio.data(), audio.size()) != 0) {
+        if (whisper_full(context, params, workspace.audio.data(), workspace.audio.size()) != 0) {
             report_error(ErrorCategory::Transcription, "Whisper could not process the speech segment.");
             return false;
         }
@@ -1063,9 +1182,10 @@ bool transcribe(
     const std::vector<std::int16_t>& samples,
     const std::vector<SpeechSegment>& segments,
     int thread_count,
+    TranscriptionWorkspace& workspace,
     const fs::path& output_path) {
     TranscriptionResult result;
-    if (!run_transcription(context, samples, segments, thread_count, result)) {
+    if (!run_transcription(context, samples, segments, thread_count, workspace, result)) {
         return false;
     }
 
@@ -1096,7 +1216,10 @@ void streaming_worker(
     const std::size_t stride_size = sample_rate * stride_seconds;
     std::vector<std::int16_t> pending;
     std::vector<std::int16_t> scratch;
+    TranscriptionWorkspace workspace;
+    const std::vector<SpeechSegment> window_range{{0, window_size}};
     pending.reserve(window_size + stride_size);
+    workspace.audio.reserve(window_size);
     const long long cpu_start = process_cpu_milliseconds();
 
     while (!shutdown_is_requested() &&
@@ -1112,10 +1235,9 @@ void streaming_worker(
 
         while (pending.size() >= window_size) {
             const auto start = std::chrono::steady_clock::now();
-            std::vector<std::int16_t> window(pending.begin(), pending.begin() + window_size);
             TranscriptionResult result;
-            const std::vector<SpeechSegment> range{{0, window.size()}};
-            if (!run_transcription(context, window, range, thread_count, result)) {
+            // Transcribe the leading window in place rather than copying it out.
+            if (!run_transcription(context, pending, window_range, thread_count, workspace, result)) {
                 report_error(ErrorCategory::Transcription, "Streaming transcription failed for an audio window.");
                 return;
             }
@@ -1195,22 +1317,132 @@ bool select_capture_device(
     return true;
 }
 
+struct PerformanceMetrics {
+    long long model_load_ms = 0;
+    long long vad_us = 0;
+    long long transcription_ms = 0;
+    long long total_ms = 0;
+    long long cpu_ms = 0;
+    long peak_memory_kb = 0;
+    double audio_seconds = 0.0;
+
+    // Below 1.0 the machine transcribes faster than the audio plays.
+    double real_time_factor() const {
+        return audio_seconds > 0.0 ? (transcription_ms / 1000.0) / audio_seconds : 0.0;
+    }
+};
+
+void report_performance(const PerformanceMetrics& metrics) {
+    std::cout << "PERF|model_load_ms=" << metrics.model_load_ms
+              << "|vad_us=" << metrics.vad_us
+              << "|transcription_ms=" << metrics.transcription_ms
+              << "|total_ms=" << metrics.total_ms
+              << "|cpu_ms=" << metrics.cpu_ms
+              << "|peak_memory_kb=" << metrics.peak_memory_kb
+              << "|rtf=" << metrics.real_time_factor() << std::endl;
+}
+
+// Runs the production pipeline (VAD then transcription) over fixed audio for
+// every model and thread count, so numbers are comparable between runs.
+bool run_benchmark(
+    const std::vector<std::string>& model_paths,
+    const std::vector<int>& thread_counts,
+    const fs::path& input_path,
+    std::uint32_t sample_rate) {
+    std::vector<std::int16_t> samples;
+    std::string reason;
+    if (!read_wav(input_path, samples, sample_rate, reason)) {
+        report_error(ErrorCategory::Recording, reason);
+        return false;
+    }
+
+    const double audio_seconds = samples.size() / static_cast<double>(sample_rate);
+    std::cout << "Benchmark input: " << input_path.string() << " (" << audio_seconds
+              << " seconds)" << std::endl;
+
+    const auto vad_start = std::chrono::steady_clock::now();
+    const std::vector<SpeechSegment> segments = detect_speech_segments(samples, sample_rate);
+    const long long vad_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - vad_start).count();
+    if (segments.empty()) {
+        report_error(ErrorCategory::Recording,
+            "No speech detected in the benchmark input; results would be meaningless.");
+        return false;
+    }
+
+    const std::vector<std::int16_t> speech = extract_speech(samples, segments);
+    const double speech_seconds = speech.size() / static_cast<double>(sample_rate);
+    const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
+    std::cout << "Speech extracted: " << speech_seconds << " seconds, VAD " << vad_us
+              << " us\n" << std::endl;
+
+    std::cout << std::left << std::setw(10) << "model" << std::setw(9) << "threads"
+              << std::setw(10) << "load ms" << std::setw(14) << "transcribe ms"
+              << std::setw(11) << "total ms" << std::setw(10) << "cpu ms"
+              << std::setw(12) << "peak KB" << std::setw(8) << "RTF" << std::endl;
+
+    for (const std::string& model_path : model_paths) {
+        ModelMetadata metadata;
+        if (!inspect_model(model_path, metadata, reason)) {
+            report_error(ErrorCategory::Model, reason);
+            return false;
+        }
+
+        for (const int threads : thread_counts) {
+            const auto total_start = std::chrono::steady_clock::now();
+            const long long cpu_start = process_cpu_milliseconds();
+
+            const auto load_start = std::chrono::steady_clock::now();
+            WhisperContext context(model_path);
+            const long long load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - load_start).count();
+            if (!context) {
+                report_error(ErrorCategory::Model,
+                    "The model header is valid but Whisper could not load it: " + model_path);
+                return false;
+            }
+
+            TranscriptionWorkspace workspace;
+            TranscriptionResult result;
+            if (!run_transcription(context.get(), speech, speech_range, threads, workspace, result)) {
+                return false;
+            }
+
+            PerformanceMetrics metrics;
+            metrics.model_load_ms = load_ms;
+            metrics.vad_us = vad_us;
+            metrics.transcription_ms = result.milliseconds;
+            metrics.total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - total_start).count();
+            metrics.cpu_ms = process_cpu_milliseconds() - cpu_start;
+            metrics.peak_memory_kb = peak_memory_kb();
+            metrics.audio_seconds = speech_seconds;
+
+            std::cout << std::left << std::setw(10) << metadata.variant
+                      << std::setw(9) << threads
+                      << std::setw(10) << metrics.model_load_ms
+                      << std::setw(14) << metrics.transcription_ms
+                      << std::setw(11) << metrics.total_ms
+                      << std::setw(10) << metrics.cpu_ms
+                      << std::setw(12) << metrics.peak_memory_kb
+                      << std::setw(8) << metrics.real_time_factor() << std::endl;
+            report_performance(metrics);
+        }
+    }
+    return true;
+}
+
+// Measured on a 12-thread machine over 12 s of speech (see docs/PERFORMANCE.md):
+// going from 8 to 11 threads cut transcription time by about 7% while using
+// roughly 24% more CPU. Eight is where the useful scaling stops, so leave the
+// rest of the machine alone.
 int default_thread_count() {
+    constexpr unsigned int useful_maximum = 8;
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
     if (hardware_threads <= 1) {
         return 1;
     }
-    return static_cast<int>(hardware_threads - 1);
-}
-
-long peak_memory_kb() {
-#ifdef __linux__
-    rusage usage{};
-    if (getrusage(RUSAGE_SELF, &usage) == 0) {
-        return usage.ru_maxrss;
-    }
-#endif
-    return 0;
+    return static_cast<int>(std::min(useful_maximum, hardware_threads - 1));
 }
 
 bool parse_options(
@@ -1223,7 +1455,10 @@ bool parse_options(
     std::vector<std::string>& model_paths,
     std::vector<std::string>& model_directories,
     int& device_index,
-    bool& list_devices) {
+    bool& list_devices,
+    bool& benchmark_mode,
+    std::string& input_path,
+    bool& threads_explicit) {
     thread_count = default_thread_count();
     compare_mode = false;
     streaming_mode = false;
@@ -1232,6 +1467,9 @@ bool parse_options(
     model_directories.clear();
     device_index = -1;
     list_devices = false;
+    benchmark_mode = false;
+    input_path.clear();
+    threads_explicit = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -1246,6 +1484,7 @@ bool parse_options(
                     throw std::out_of_range("thread count");
                 }
                 thread_count = static_cast<int>(parsed);
+                threads_explicit = true;
             } catch (const std::exception&) {
                 std::cerr << "Thread count must be a positive integer." << std::endl;
                 return false;
@@ -1264,6 +1503,14 @@ bool parse_options(
                 std::cerr << "Device index must be zero or a positive integer." << std::endl;
                 return false;
             }
+        } else if (argument == "--benchmark") {
+            benchmark_mode = true;
+        } else if (argument == "--input") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value after --input." << std::endl;
+                return false;
+            }
+            input_path = argv[++i];
         } else if (argument == "--list-devices") {
             list_devices = true;
         } else if (argument == "--model-dir") {
@@ -1297,6 +1544,8 @@ bool parse_options(
                       << "      [--duration 15|45|60] [--stream] [--model-dir DIR]\n"
                       << "      [--device INDEX]\n"
                       << "  ./build-release/audio_to_text_cli --list-devices\n"
+                      << "  ./build-release/audio_to_text_cli --benchmark --input SPEECH.wav\n"
+                      << "      MODEL_PATH ... [--threads N]\n"
                       << "  ./build-release/audio_to_text_cli --compare MODEL_PATH MODEL_PATH ...\n"
                       << "      [--threads N] [--model-dir DIR]\n"
                       << "\nModels must sit inside ./models, the application data directory,\n"
@@ -1313,6 +1562,16 @@ bool parse_options(
     }
 
     if (list_devices) {
+        return true;
+    }
+    if (benchmark_mode) {
+        if (input_path.empty()) {
+            std::cerr << "--benchmark requires --input PATH (mono 16-bit WAV at 16 kHz)." << std::endl;
+            return false;
+        }
+        if (model_paths.empty()) {
+            model_paths.emplace_back("models/ggml-base.en.bin");
+        }
         return true;
     }
     if (model_paths.empty() && !compare_mode) {
@@ -1346,9 +1605,10 @@ bool compare_models(
 
         TranscriptionResult original_result;
         TranscriptionResult cleaned_result;
+        TranscriptionWorkspace workspace;
         const bool success = run_transcription(
-                context.get(), original, speech_range, thread_count, original_result) &&
-            run_transcription(context.get(), cleaned, speech_range, thread_count, cleaned_result);
+                context.get(), original, speech_range, thread_count, workspace, original_result) &&
+            run_transcription(context.get(), cleaned, speech_range, thread_count, workspace, cleaned_result);
         const long memory_kb = peak_memory_kb();
         if (!success) {
             return false;
@@ -1379,8 +1639,12 @@ int run(int argc, char** argv) {
     std::vector<std::string> model_directories;
     int device_index = -1;
     bool list_devices = false;
+    bool benchmark_mode = false;
+    std::string input_path;
+    bool threads_explicit = false;
     if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, duration_seconds,
-                       model_paths, model_directories, device_index, list_devices)) {
+                       model_paths, model_directories, device_index, list_devices,
+                       benchmark_mode, input_path, threads_explicit)) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
@@ -1443,6 +1707,25 @@ int run(int argc, char** argv) {
     }
     model_paths = approved_models;
 
+    if (benchmark_mode) {
+        // The plan's sweep, minus anything this machine cannot actually run.
+        const unsigned int available = std::thread::hardware_concurrency();
+        std::vector<int> thread_counts;
+        if (threads_explicit) {
+            thread_counts.push_back(thread_count);
+        } else {
+            for (const int candidate : {2, 4, 8, 11}) {
+                if (available == 0 || candidate <= static_cast<int>(available)) {
+                    thread_counts.push_back(candidate);
+                } else {
+                    std::cout << "Skipping " << candidate << " threads; this machine reports "
+                              << available << "." << std::endl;
+                }
+            }
+        }
+        return run_benchmark(model_paths, thread_counts, input_path, sample_rate) ? 0 : 1;
+    }
+
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
     std::cout << "CPU threads detected: " << (hardware_threads == 0 ? 1 : hardware_threads)
               << ", Whisper threads: " << thread_count
@@ -1476,6 +1759,7 @@ int run(int argc, char** argv) {
     AudioCapture capture(maximum_samples);
     std::vector<std::int16_t> recorded_samples;
     std::vector<std::int16_t> drain_scratch;
+    TranscriptionWorkspace workspace;
     recorded_samples.reserve(maximum_samples);
 
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
@@ -1631,7 +1915,7 @@ int run(int argc, char** argv) {
             }
         } else if (context) {
             const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
-            if (!transcribe(context.get(), speech, speech_range, thread_count, transcript_path)) {
+            if (!transcribe(context.get(), speech, speech_range, thread_count, workspace, transcript_path)) {
                 break;
             }
         }

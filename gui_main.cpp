@@ -128,7 +128,8 @@ private:
         error_shown_ = false;
         const QString model = model_selector_->currentData().toString();
         const QString duration = duration_selector_->currentData().toString();
-        QStringList arguments{model, "--stream", "--threads", "4", "--duration", duration};
+        // No --threads: the worker's measured default is the single source of truth.
+        QStringList arguments{model, "--stream", "--duration", duration};
         const int device = device_selector_->currentData().toInt();
         if (device >= 0) {
             arguments << "--device" << QString::number(device);
