@@ -1,6 +1,12 @@
 # Testing
 
 ```bash
+tests/run_gates.sh          # tests plus every other gate
+```
+
+Or the tests alone:
+
+```bash
 cmake -S . -B build-release
 cmake --build build-release --parallel
 cd build-release && ctest --output-on-failure

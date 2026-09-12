@@ -70,16 +70,16 @@ clear errors instead of unbounded memory growth.
 
 ## Checks before pushing
 
-Everything the continuous integration workflow runs is available locally:
+Everything is checked locally; there is no hosted pipeline to wait on:
 
 ```bash
-./tests/check_guarantees.sh        # nothing private tracked, no networking
-./tests/check_style.sh             # whitespace, line endings, line length
-ctest --test-dir build-release --output-on-failure
+tests/run_gates.sh          # every gate
+tests/run_gates.sh --quick  # skip the sanitizer build
 ```
 
-Add `-DAUDIO_TO_TEXT_WARNINGS_AS_ERRORS=ON` when configuring to match the
-compiler settings used in the workflow. See [CI.md](CI.md).
+That runs the guarantee and formatting checks, builds with
+`-DAUDIO_TO_TEXT_WARNINGS_AS_ERRORS=ON`, runs the tests, and runs the
+sanitizers. See [QUALITY_GATES.md](QUALITY_GATES.md).
 
 ## Sanitizer build
 
