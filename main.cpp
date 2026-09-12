@@ -182,6 +182,66 @@ private:
     whisper_context* context_ = nullptr;
 };
 
+// Turns a miniaudio result into something a user can act on.
+std::string describe_device_error(ma_result result) {
+    switch (result) {
+        case MA_ACCESS_DENIED:
+            return "Access to the microphone was denied. Grant this application "
+                "permission to use the microphone and try again.";
+        case MA_NO_DEVICE:
+            return "No capture device is available. Connect a microphone and try again.";
+        case MA_DEVICE_NOT_INITIALIZED:
+            return "The capture device is no longer initialised. It may have been disconnected.";
+        case MA_DEVICE_NOT_STARTED:
+            return "The capture device did not start.";
+        case MA_BUSY:
+            return "The microphone is in use by another application.";
+        default:
+            return std::string("The capture device could not be used (") +
+                ma_result_description(result) + ").";
+    }
+}
+
+// Devices are enumerated and opened from the same context, so a chosen device
+// identifier stays valid between listing and opening.
+class AudioContext {
+public:
+    AudioContext() = default;
+
+    ~AudioContext() {
+        if (initialized_) {
+            ma_context_uninit(&context_);
+            initialized_ = false;
+        }
+    }
+
+    AudioContext(const AudioContext&) = delete;
+    AudioContext& operator=(const AudioContext&) = delete;
+    AudioContext(AudioContext&&) = delete;
+    AudioContext& operator=(AudioContext&&) = delete;
+
+    ma_result initialize() {
+        const ma_result result = ma_context_init(nullptr, 0, nullptr, &context_);
+        initialized_ = result == MA_SUCCESS;
+        return result;
+    }
+
+    ma_result capture_devices(ma_device_info** infos, ma_uint32* count) {
+        if (!initialized_) {
+            return MA_DEVICE_NOT_INITIALIZED;
+        }
+        return ma_context_get_devices(&context_, nullptr, nullptr, infos, count);
+    }
+
+    ma_context* get() {
+        return initialized_ ? &context_ : nullptr;
+    }
+
+private:
+    ma_context context_{};
+    bool initialized_ = false;
+};
+
 class CaptureDevice {
 public:
     CaptureDevice() = default;
@@ -199,20 +259,22 @@ public:
     CaptureDevice(CaptureDevice&&) = delete;
     CaptureDevice& operator=(CaptureDevice&&) = delete;
 
-    bool initialize(const ma_device_config& config) {
-        if (initialized_ || ma_device_init(nullptr, &config, &device_) != MA_SUCCESS) {
-            return false;
+    ma_result initialize(ma_context* context, const ma_device_config& config) {
+        if (initialized_) {
+            return MA_INVALID_OPERATION;
         }
-        initialized_ = true;
-        return true;
+        const ma_result result = ma_device_init(context, &config, &device_);
+        initialized_ = result == MA_SUCCESS;
+        return result;
     }
 
-    bool start() {
-        if (!initialized_ || ma_device_start(&device_) != MA_SUCCESS) {
-            return false;
+    ma_result start() {
+        if (!initialized_) {
+            return MA_DEVICE_NOT_INITIALIZED;
         }
-        running_ = true;
-        return true;
+        const ma_result result = ma_device_start(&device_);
+        running_ = result == MA_SUCCESS;
+        return result;
     }
 
     void stop() {
@@ -220,6 +282,14 @@ public:
             ma_device_stop(&device_);
             running_ = false;
         }
+    }
+
+    // Empty when the backend does not report a name.
+    std::string name() const {
+        if (!initialized_) {
+            return {};
+        }
+        return std::string(device_.capture.name);
     }
 
 private:
@@ -605,13 +675,6 @@ void report_saved(const char* kind, const fs::path& path) {
     std::cout << "SAVED|" << kind << '|' << path.string() << std::endl;
 }
 
-struct Recording {
-    std::mutex mutex;
-    std::vector<std::int16_t> samples;
-    std::size_t maximum_samples = 0;
-    std::atomic<bool> limit_reached{false};
-};
-
 class AudioRingBuffer {
 public:
     explicit AudioRingBuffer(std::size_t capacity)
@@ -658,31 +721,31 @@ private:
     std::atomic<std::size_t> read_position_;
 };
 
-struct StreamingCapture {
+// One bounded sink for every recording mode. The audio callback does nothing
+// but copy into the ring buffer and bump counters: no lock, no allocation, no
+// system call, no branch on recording mode.
+struct AudioCapture {
     AudioRingBuffer buffer;
-    std::vector<std::int16_t> all_samples;
-    std::size_t maximum_samples;
-    std::atomic<std::size_t> total_samples{0};
-    std::atomic<bool> recording{false};
+    std::atomic<std::size_t> captured_frames{0};
+    std::atomic<std::size_t> dropped_frames{0};
+    std::atomic<bool> device_lost{false};
+    std::atomic<bool> expected_stop{false};
     std::atomic<bool> finished{false};
-    std::atomic<bool> overflowed{false};
 
-    explicit StreamingCapture(std::size_t capacity)
-        : buffer(capacity), all_samples(capacity), maximum_samples(capacity) {}
+    explicit AudioCapture(std::size_t capacity) : buffer(capacity) {}
 
     void reset() {
         buffer.reset();
-        total_samples.store(0, std::memory_order_release);
-        recording.store(false, std::memory_order_release);
+        captured_frames.store(0, std::memory_order_release);
+        dropped_frames.store(0, std::memory_order_release);
+        device_lost.store(false, std::memory_order_release);
+        expected_stop.store(false, std::memory_order_release);
         finished.store(false, std::memory_order_release);
-        overflowed.store(false, std::memory_order_release);
-        maximum_samples = all_samples.size();
     }
-};
 
-struct CaptureState {
-    Recording* recording;
-    StreamingCapture* streaming;
+    double dropped_seconds(std::uint32_t sample_rate) const {
+        return static_cast<double>(dropped_frames.load(std::memory_order_acquire)) / sample_rate;
+    }
 };
 
 void capture_callback(ma_device* device, void*, const void* input, ma_uint32 frame_count) {
@@ -690,51 +753,61 @@ void capture_callback(ma_device* device, void*, const void* input, ma_uint32 fra
         return;
     }
 
-    auto* state = static_cast<CaptureState*>(device->pUserData);
-    auto* recording = state->recording;
+    auto* capture = static_cast<AudioCapture*>(device->pUserData);
     const auto* samples = static_cast<const std::int16_t*>(input);
-
-    std::lock_guard<std::mutex> lock(recording->mutex);
-    const std::size_t remaining = recording->maximum_samples > recording->samples.size()
-        ? recording->maximum_samples - recording->samples.size()
-        : 0;
-    const std::size_t count = std::min<std::size_t>(frame_count, remaining);
-    recording->samples.insert(recording->samples.end(), samples, samples + count);
-    if (count != frame_count) {
-        recording->limit_reached.store(true, std::memory_order_release);
+    const std::size_t written = capture->buffer.write(samples, frame_count);
+    capture->captured_frames.fetch_add(written, std::memory_order_relaxed);
+    if (written != frame_count) {
+        capture->dropped_frames.fetch_add(frame_count - written, std::memory_order_relaxed);
     }
 }
 
-void streaming_capture_callback(ma_device* device, void*, const void* input, ma_uint32 frame_count) {
-    if (input == nullptr) {
+// A reroute, a system interruption, or a stop we did not ask for all mean the
+// capture stream can no longer be trusted.
+void capture_notification_callback(const ma_device_notification* notification) {
+    if (notification == nullptr || notification->pDevice == nullptr) {
+        return;
+    }
+    auto* capture = static_cast<AudioCapture*>(notification->pDevice->pUserData);
+    if (capture == nullptr) {
         return;
     }
 
-    auto* state = static_cast<CaptureState*>(device->pUserData);
-    auto* capture = state->streaming;
-    const auto* samples = static_cast<const std::int16_t*>(input);
-    const std::size_t offset = capture->total_samples.fetch_add(frame_count, std::memory_order_relaxed);
-    const std::size_t remaining = offset < capture->maximum_samples
-        ? capture->maximum_samples - offset
-        : 0;
-    const std::size_t count = std::min<std::size_t>(frame_count, remaining);
-    if (count > 0) {
-        std::copy(samples, samples + count, capture->all_samples.begin() + offset);
-    } else {
-        capture->overflowed.store(true, std::memory_order_release);
-    }
-    if (count != frame_count || capture->buffer.write(samples, count) != count) {
-        capture->overflowed.store(true, std::memory_order_release);
+    switch (notification->type) {
+        case ma_device_notification_type_stopped:
+            // miniaudio also raises this for our own ma_device_stop call.
+            if (!capture->expected_stop.load(std::memory_order_acquire)) {
+                capture->device_lost.store(true, std::memory_order_release);
+            }
+            break;
+        case ma_device_notification_type_rerouted:
+        case ma_device_notification_type_interruption_began:
+            capture->device_lost.store(true, std::memory_order_release);
+            break;
+        default:
+            break;
     }
 }
 
-void capture_dispatch_callback(ma_device* device, void* output, const void* input, ma_uint32 frame_count) {
-    auto* state = static_cast<CaptureState*>(device->pUserData);
-    if (state->streaming->recording.load(std::memory_order_acquire)) {
-        streaming_capture_callback(device, output, input, frame_count);
-    } else {
-        capture_callback(device, output, input, frame_count);
+// Moves buffered audio into `samples`, never past `limit`. Runs on a normal
+// thread; the reserved capacity means the insert does not allocate.
+std::size_t drain_capture(
+    AudioCapture& capture,
+    std::vector<std::int16_t>& samples,
+    std::vector<std::int16_t>& scratch,
+    std::size_t limit) {
+    constexpr std::size_t chunk = 4096;
+    std::size_t moved = 0;
+    while (samples.size() < limit) {
+        const std::size_t wanted = std::min(limit - samples.size(), chunk);
+        const std::size_t count = capture.buffer.read(scratch, wanted);
+        if (count == 0) {
+            break;
+        }
+        samples.insert(samples.end(), scratch.begin(), scratch.begin() + count);
+        moved += count;
     }
+    return moved;
 }
 
 void append_little_endian(std::vector<char>& buffer, std::uint32_t value) {
@@ -1011,7 +1084,9 @@ bool transcribe(
 }
 
 void streaming_worker(
-    StreamingCapture& capture,
+    AudioCapture& capture,
+    std::vector<std::int16_t>& all_samples,
+    std::size_t maximum_samples,
     whisper_context* context,
     int thread_count,
     std::uint32_t sample_rate) {
@@ -1020,14 +1095,17 @@ void streaming_worker(
     const std::size_t window_size = sample_rate * window_seconds;
     const std::size_t stride_size = sample_rate * stride_seconds;
     std::vector<std::int16_t> pending;
-    std::vector<std::int16_t> incoming;
+    std::vector<std::int16_t> scratch;
     pending.reserve(window_size + stride_size);
     const long long cpu_start = process_cpu_milliseconds();
 
     while (!shutdown_is_requested() &&
            (!capture.finished.load(std::memory_order_acquire) || capture.buffer.available() > 0)) {
-        if (capture.buffer.read(incoming, sample_rate / 10) > 0) {
-            pending.insert(pending.end(), incoming.begin(), incoming.end());
+        // The worker owns the drain, so the audio callback never allocates.
+        const std::size_t before = all_samples.size();
+        drain_capture(capture, all_samples, scratch, maximum_samples);
+        if (all_samples.size() > before) {
+            pending.insert(pending.end(), all_samples.begin() + before, all_samples.end());
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
@@ -1050,11 +1128,71 @@ void streaming_worker(
         }
     }
 
-    if (capture.overflowed.load(std::memory_order_acquire)) {
-        report_warning(ErrorCategory::Recording, "Streaming buffer overflowed; audio was dropped.");
+    const std::size_t dropped = capture.dropped_frames.load(std::memory_order_acquire);
+    if (dropped > 0) {
+        report_warning(ErrorCategory::Recording,
+            "Streaming buffer overflowed; " + std::to_string(dropped) + " frames (" +
+            std::to_string(capture.dropped_seconds(sample_rate)) + " s) were dropped.");
     }
     std::cout << "Streaming worker CPU time: "
               << process_cpu_milliseconds() - cpu_start << " ms" << std::endl;
+}
+
+// Prints the capture devices in a form both a person and the GUI can read.
+bool list_capture_devices(AudioContext& context) {
+    ma_device_info* infos = nullptr;
+    ma_uint32 count = 0;
+    const ma_result result = context.capture_devices(&infos, &count);
+    if (result != MA_SUCCESS) {
+        report_error(ErrorCategory::Microphone, describe_device_error(result));
+        return false;
+    }
+    if (count == 0) {
+        report_error(ErrorCategory::Microphone,
+            "No capture device is available. Connect a microphone and try again.");
+        return false;
+    }
+
+    for (ma_uint32 i = 0; i < count; ++i) {
+        std::cout << "DEVICE|" << i << '|'
+                  << (infos[i].isDefault ? "default" : "") << '|'
+                  << infos[i].name << std::endl;
+    }
+    return true;
+}
+
+// Resolves the requested index to a device identifier. A negative index means
+// the system default, which is left as a null identifier.
+bool select_capture_device(
+    AudioContext& context,
+    int requested_index,
+    ma_device_id& id,
+    bool& has_id,
+    std::string& name) {
+    has_id = false;
+    name = "system default";
+    if (requested_index < 0) {
+        return true;
+    }
+
+    ma_device_info* infos = nullptr;
+    ma_uint32 count = 0;
+    const ma_result result = context.capture_devices(&infos, &count);
+    if (result != MA_SUCCESS) {
+        report_error(ErrorCategory::Microphone, describe_device_error(result));
+        return false;
+    }
+    if (static_cast<ma_uint32>(requested_index) >= count) {
+        report_error(ErrorCategory::Microphone,
+            "Capture device " + std::to_string(requested_index) + " does not exist; " +
+            std::to_string(count) + " device(s) are available. Use --list-devices.");
+        return false;
+    }
+
+    id = infos[requested_index].id;
+    has_id = true;
+    name = infos[requested_index].name;
+    return true;
 }
 
 int default_thread_count() {
@@ -1083,13 +1221,17 @@ bool parse_options(
     bool& streaming_mode,
     int& duration_seconds,
     std::vector<std::string>& model_paths,
-    std::vector<std::string>& model_directories) {
+    std::vector<std::string>& model_directories,
+    int& device_index,
+    bool& list_devices) {
     thread_count = default_thread_count();
     compare_mode = false;
     streaming_mode = false;
     duration_seconds = 15;
     model_paths.clear();
     model_directories.clear();
+    device_index = -1;
+    list_devices = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -1108,6 +1250,22 @@ bool parse_options(
                 std::cerr << "Thread count must be a positive integer." << std::endl;
                 return false;
             }
+        } else if (argument == "--device") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value after --device." << std::endl;
+                return false;
+            }
+            try {
+                device_index = std::stoi(argv[++i]);
+                if (device_index < 0) {
+                    throw std::out_of_range("device index");
+                }
+            } catch (const std::exception&) {
+                std::cerr << "Device index must be zero or a positive integer." << std::endl;
+                return false;
+            }
+        } else if (argument == "--list-devices") {
+            list_devices = true;
         } else if (argument == "--model-dir") {
             if (i + 1 >= argc) {
                 std::cerr << "Missing value after --model-dir." << std::endl;
@@ -1137,6 +1295,8 @@ bool parse_options(
             std::cout << "Usage:\n"
                       << "  ./build-release/audio_to_text_cli MODEL_PATH [--threads N]\n"
                       << "      [--duration 15|45|60] [--stream] [--model-dir DIR]\n"
+                      << "      [--device INDEX]\n"
+                      << "  ./build-release/audio_to_text_cli --list-devices\n"
                       << "  ./build-release/audio_to_text_cli --compare MODEL_PATH MODEL_PATH ...\n"
                       << "      [--threads N] [--model-dir DIR]\n"
                       << "\nModels must sit inside ./models, the application data directory,\n"
@@ -1152,6 +1312,9 @@ bool parse_options(
         }
     }
 
+    if (list_devices) {
+        return true;
+    }
     if (model_paths.empty() && !compare_mode) {
         model_paths.emplace_back("models/ggml-base.en.bin");
     }
@@ -1207,7 +1370,6 @@ bool compare_models(
 
 int run(int argc, char** argv) {
     constexpr ma_uint32 sample_rate = WHISPER_SAMPLE_RATE;
-    Recording recording;
 
     int thread_count = 0;
     bool compare_mode = false;
@@ -1215,12 +1377,25 @@ int run(int argc, char** argv) {
     int duration_seconds = 15;
     std::vector<std::string> model_paths;
     std::vector<std::string> model_directories;
+    int device_index = -1;
+    bool list_devices = false;
     if (!parse_options(argc, argv, thread_count, compare_mode, streaming_mode, duration_seconds,
-                       model_paths, model_directories)) {
+                       model_paths, model_directories, device_index, list_devices)) {
         return argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") ? 0 : 1;
     }
 
     install_shutdown_handlers();
+
+    AudioContext audio_context;
+    const ma_result context_result = audio_context.initialize();
+    if (context_result != MA_SUCCESS) {
+        report_error(ErrorCategory::Microphone, describe_device_error(context_result));
+        return 1;
+    }
+
+    if (list_devices) {
+        return list_capture_devices(audio_context) ? 0 : 1;
+    }
 
     const fs::path data_directory = application_data_directory();
     const fs::path recordings_directory = data_directory / "recordings";
@@ -1290,22 +1465,38 @@ int run(int argc, char** argv) {
         }
     }
 
+    ma_device_id selected_id{};
+    bool has_selected_id = false;
+    std::string selected_name;
+    if (!select_capture_device(audio_context, device_index, selected_id, has_selected_id, selected_name)) {
+        return 1;
+    }
+
+    const std::size_t maximum_samples = static_cast<std::size_t>(sample_rate) * duration_seconds;
+    AudioCapture capture(maximum_samples);
+    std::vector<std::int16_t> recorded_samples;
+    std::vector<std::int16_t> drain_scratch;
+    recorded_samples.reserve(maximum_samples);
+
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
     config.capture.format = ma_format_s16;
     config.capture.channels = 1;
+    config.capture.pDeviceID = has_selected_id ? &selected_id : nullptr;
     config.sampleRate = sample_rate;
-    const std::size_t maximum_samples = static_cast<std::size_t>(sample_rate) * duration_seconds;
-    recording.maximum_samples = maximum_samples;
-    StreamingCapture streaming_capture(maximum_samples);
-    CaptureState capture_state{&recording, &streaming_capture};
-    config.dataCallback = capture_dispatch_callback;
-    config.pUserData = &capture_state;
+    config.dataCallback = capture_callback;
+    config.notificationCallback = capture_notification_callback;
+    config.pUserData = &capture;
 
     CaptureDevice device;
-    if (!device.initialize(config)) {
-        report_error(ErrorCategory::Microphone, "Could not open the microphone.");
+    const ma_result device_result = device.initialize(audio_context.get(), config);
+    if (device_result != MA_SUCCESS) {
+        report_error(ErrorCategory::Microphone, describe_device_error(device_result));
         return 1;
     }
+
+    const std::string active_name = device.name().empty() ? selected_name : device.name();
+    std::cout << "INPUT|" << active_name << std::endl;
+    std::cout << "Microphone: " << active_name << std::endl;
 
     while (!shutdown_is_requested()) {
         std::cout << "Press Enter to start recording, or type q to quit." << std::endl;
@@ -1318,64 +1509,57 @@ int run(int argc, char** argv) {
             break;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(recording.mutex);
-            recording.samples.clear();
-            recording.samples.reserve(recording.maximum_samples);
+        capture.reset();
+        recorded_samples.clear();
+
+        const ma_result start_result = device.start();
+        if (start_result != MA_SUCCESS) {
+            report_error(ErrorCategory::Microphone, describe_device_error(start_result));
+            break;
         }
-        recording.limit_reached.store(false, std::memory_order_release);
 
         if (streaming_mode) {
-            streaming_capture.reset();
-            streaming_capture.recording.store(true, std::memory_order_release);
-            if (!device.start()) {
-                streaming_capture.recording.store(false, std::memory_order_release);
-                report_error(ErrorCategory::Microphone, "Could not start recording.");
-                break;
-            }
-
             ScopedThread worker(std::thread(
-                streaming_worker, std::ref(streaming_capture), context.get(), thread_count, sample_rate));
+                streaming_worker, std::ref(capture), std::ref(recorded_samples), maximum_samples,
+                context.get(), thread_count, sample_rate));
             std::cout << "Streaming recording... Press Enter to stop." << std::endl;
             read_command(command);
-            streaming_capture.recording.store(false, std::memory_order_release);
+            capture.expected_stop.store(true, std::memory_order_release);
             device.stop();
-            streaming_capture.finished.store(true, std::memory_order_release);
+            capture.finished.store(true, std::memory_order_release);
             worker.join();
-
-            const std::size_t sample_count = std::min(
-                streaming_capture.total_samples.load(std::memory_order_acquire),
-                streaming_capture.all_samples.size());
-            recording.samples.assign(
-                streaming_capture.all_samples.begin(),
-                streaming_capture.all_samples.begin() + sample_count);
-            if (streaming_capture.overflowed.load(std::memory_order_acquire)) {
-                report_warning(ErrorCategory::Recording,
-                    "Recording reached its limit or the streaming buffer overflowed; audio was truncated.");
-            }
         } else {
-            if (!device.start()) {
-                report_error(ErrorCategory::Microphone, "Could not start recording.");
-                break;
-            }
-
             std::cout << "Recording... Press Enter to stop." << std::endl;
             read_command(command);
+            capture.expected_stop.store(true, std::memory_order_release);
             device.stop();
+            capture.finished.store(true, std::memory_order_release);
         }
+
+        // Whatever mode ran, anything still buffered belongs to this recording.
+        drain_capture(capture, recorded_samples, drain_scratch, maximum_samples);
 
         if (shutdown_is_requested()) {
             break;
         }
 
-        if (recording.samples.empty()) {
+        if (capture.device_lost.load(std::memory_order_acquire)) {
+            report_error(ErrorCategory::Microphone,
+                "The microphone stopped or changed during recording. Reconnect it and record again.");
+            continue;
+        }
+
+        if (recorded_samples.empty()) {
             report_error(ErrorCategory::Recording, "No audio was captured. Check the microphone and try again.");
             continue;
         }
-        if (recording.limit_reached.load(std::memory_order_acquire)) {
+
+        const std::size_t dropped = capture.dropped_frames.load(std::memory_order_acquire);
+        if (dropped > 0) {
             report_warning(ErrorCategory::Recording,
-                "Recording reached the " + std::to_string(duration_seconds) +
-                " second limit; extra audio was discarded.");
+                "Reached the " + std::to_string(duration_seconds) + " second limit or could not keep up; " +
+                std::to_string(dropped) + " frames (" +
+                std::to_string(capture.dropped_seconds(sample_rate)) + " s) were dropped.");
         }
 
         const std::string stamp = session_stamp();
@@ -1390,18 +1574,18 @@ int run(int argc, char** argv) {
             break;
         }
 
-        if (!write_wav(recording_path, recording.samples, sample_rate)) {
+        if (!write_wav(recording_path, recorded_samples, sample_rate)) {
             report_error(ErrorCategory::FileSaving, "Could not save " + recording_path.string() + ".");
             break;
         }
 
         report_saved("RECORDING", recording_path);
         std::cout << "Recorded "
-                  << recording.samples.size() / static_cast<double>(sample_rate)
+                  << recorded_samples.size() / static_cast<double>(sample_rate)
                   << " seconds." << std::endl;
 
-        const NoiseProfile noise_profile = measure_noise_floor(recording.samples, sample_rate);
-        const std::vector<std::int16_t> cleaned_samples = reduce_noise(recording.samples, noise_profile);
+        const NoiseProfile noise_profile = measure_noise_floor(recorded_samples, sample_rate);
+        const std::vector<std::int16_t> cleaned_samples = reduce_noise(recorded_samples, noise_profile);
         if (!write_wav(cleaned_path, cleaned_samples, sample_rate)) {
             report_error(ErrorCategory::FileSaving, "Could not save " + cleaned_path.string() + ".");
             break;
@@ -1416,7 +1600,7 @@ int run(int argc, char** argv) {
         report_saved("CLEANED", cleaned_path);
 
         const auto vad_start = std::chrono::steady_clock::now();
-        const std::vector<SpeechSegment> speech_segments = detect_speech_segments(recording.samples, sample_rate);
+        const std::vector<SpeechSegment> speech_segments = detect_speech_segments(recorded_samples, sample_rate);
         const auto vad_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - vad_start).count();
 
@@ -1425,14 +1609,14 @@ int run(int argc, char** argv) {
             continue;
         }
 
-        const std::vector<std::int16_t> speech = extract_speech(recording.samples, speech_segments);
+        const std::vector<std::int16_t> speech = extract_speech(recorded_samples, speech_segments);
         const std::vector<std::int16_t> cleaned_speech = extract_speech(cleaned_samples, speech_segments);
         if (!write_wav(speech_path, speech, sample_rate)) {
             report_error(ErrorCategory::FileSaving, "Could not save " + speech_path.string() + ".");
             break;
         }
 
-        const double raw_seconds = recording.samples.size() / static_cast<double>(sample_rate);
+        const double raw_seconds = recorded_samples.size() / static_cast<double>(sample_rate);
         const double speech_seconds = speech.size() / static_cast<double>(sample_rate);
         const double reduction = raw_seconds > 0.0 ? (1.0 - speech_seconds / raw_seconds) * 100.0 : 0.0;
         std::cout << "Speech detected: " << speech_seconds << " seconds in "
