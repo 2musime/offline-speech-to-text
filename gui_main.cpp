@@ -71,6 +71,12 @@ public:
         keep_audio_->setChecked(true);
         keep_audio_->setToolTip("When off, audio is transcribed and discarded; no WAV file is written.");
 
+        home_from_record_ = new QPushButton("\u2190  Home", central);
+        auto* record_nav = new QHBoxLayout();
+        record_nav->addWidget(home_from_record_);
+        record_nav->addStretch();
+        layout->addLayout(record_nav);
+
         auto* settings = new QHBoxLayout();
         settings->setSpacing(8);
         settings->addWidget(new QLabel("Model:", central));
@@ -146,6 +152,8 @@ public:
         copy_button_ = new QPushButton("Copy", central);
         save_button_->setEnabled(false);
         copy_button_->setEnabled(false);
+        save_button_->setShortcut(QKeySequence::Save);
+        copy_button_->setShortcut(QKeySequence("Ctrl+Shift+C"));
         transcript_header->addWidget(save_button_);
         transcript_header->addWidget(copy_button_);
         layout->addLayout(transcript_header);
@@ -179,7 +187,7 @@ public:
         auto* library_layout = new QVBoxLayout(library_page);
         library_layout->setSpacing(12);
 
-        back_button_ = new QPushButton("\u2190  Back to Recording", library_page);
+        back_button_ = new QPushButton("\u2190  Home", library_page);
         back_button_->setMinimumHeight(32);
         auto* library_header = new QHBoxLayout();
         library_header->addWidget(back_button_);
@@ -248,7 +256,44 @@ public:
         library_body->addWidget(reader, 1);
         library_layout->addLayout(library_body, 1);
 
+        // ---- Landing screen. Deliberately almost empty: it says what the
+        // application is and offers the one thing a new user wants. Recording
+        // happens on the recording screen, not here.
+        auto* home_page = new QWidget(this);
+        auto* home_layout = new QVBoxLayout(home_page);
+        home_layout->addStretch();
+
+        auto* welcome = new QLabel("Audio to Text", home_page);
+        QFont welcome_font = welcome->font();
+        welcome_font.setPointSize(welcome_font.pointSize() + 14);
+        welcome_font.setBold(true);
+        welcome->setFont(welcome_font);
+        welcome->setAlignment(Qt::AlignCenter);
+        home_layout->addWidget(welcome);
+
+        auto* tagline = new QLabel(
+            "Speech to text that runs entirely on this computer.\n"
+            "Your audio is never uploaded.", home_page);
+        tagline->setAlignment(Qt::AlignCenter);
+        home_layout->addWidget(tagline);
+        home_layout->addSpacing(28);
+
+        go_record_button_ = new QPushButton("Start a Recording", home_page);
+        go_record_button_->setMinimumHeight(44);
+        go_record_button_->setMinimumWidth(240);
+        QFont go_font = go_record_button_->font();
+        go_font.setBold(true);
+        go_record_button_->setFont(go_font);
+        go_record_button_->setCursor(Qt::PointingHandCursor);
+        auto* go_row = new QHBoxLayout();
+        go_row->addStretch();
+        go_row->addWidget(go_record_button_);
+        go_row->addStretch();
+        home_layout->addLayout(go_row);
+        home_layout->addStretch();
+
         stack_ = new QStackedWidget(this);
+        stack_->addWidget(home_page);
         stack_->addWidget(central);
         stack_->addWidget(library_page);
         setCentralWidget(stack_);
@@ -277,7 +322,9 @@ public:
         // Resolved here rather than waiting for the worker, so saved
         // transcripts can be read before anything has been recorded.
         data_directory_ = QString::fromStdString(application_data_directory().string());
-        connect(back_button_, &QPushButton::clicked, this, [this] { show_recorder(); });
+        connect(back_button_, &QPushButton::clicked, this, [this] { show_home(); });
+        connect(home_from_record_, &QPushButton::clicked, this, [this] { show_home(); });
+        connect(go_record_button_, &QPushButton::clicked, this, [this] { show_recorder(); });
         connect(saved_copy_, &QPushButton::clicked, this, [this] { copy_saved(); });
         connect(saved_save_, &QPushButton::clicked, this, [this] { save_saved(); });
         connect(delete_saved_, &QPushButton::clicked, this, [this] { delete_selected_transcript(); });
@@ -319,6 +366,8 @@ public:
         });
 
         apply_state(UiState::Ready);
+        // Start on the landing screen, with its own status line.
+        show_home();
     }
 
 private:
@@ -551,18 +600,12 @@ private:
     // recordings is destructive and should be reached deliberately, not brushed
     // past while choosing a microphone.
     void build_menus() {
-        QMenu* file_menu = menuBar()->addMenu("&File");
-        save_action_ = file_menu->addAction("&Save Transcript...", this, [this] { save_transcript(); });
-        save_action_->setShortcut(QKeySequence::Save);
-        // Ctrl+C belongs to the transcript for copying a selection, so the
-        // whole-transcript copy takes the shifted form.
-        copy_action_ = file_menu->addAction("&Copy Transcript", this, [this] { copy_transcript(); });
-        copy_action_->setShortcut(QKeySequence("Ctrl+Shift+C"));
-        file_menu->addSeparator();
-        delete_action_ = file_menu->addAction("&Delete All Recordings...", this,
-                                              [this] { delete_recordings(); });
-        file_menu->addSeparator();
-        file_menu->addAction("&Quit", this, [this] { close(); })
+        // Home holds only what belongs to the application as a whole. Saving
+        // and copying act on the transcript in front of you, so they live with
+        // it; deleting everything is about stored data, so it lives with the
+        // transcripts.
+        QMenu* home_menu = menuBar()->addMenu("&Home");
+        home_menu->addAction("&Quit", this, [this] { close(); })
             ->setShortcut(QKeySequence::Quit);
 
         QMenu* recording_menu = menuBar()->addMenu("&Recording");
@@ -572,6 +615,8 @@ private:
             if (state_ == UiState::Recording) {
                 stop_recording();
             } else {
+                // Recording belongs to its own screen: go there first.
+                show_recorder();
                 start_recording();
             }
         });
@@ -581,10 +626,13 @@ private:
 
         QMenu* transcripts_menu = menuBar()->addMenu("&Transcripts");
         history_action_ = transcripts_menu->addAction("&Saved Transcripts", this,
-                                               [this] { toggle_library(); });
+                                                      [this] { toggle_library(); });
         history_action_->setCheckable(true);
         history_action_->setShortcut(QKeySequence("Ctrl+H"));
         history_action_->setStatusTip("Read transcripts from earlier recordings");
+        transcripts_menu->addSeparator();
+        delete_action_ = transcripts_menu->addAction("&Delete All Recordings...", this,
+                                                     [this] { delete_recordings(); });
 
         QMenu* help_menu = menuBar()->addMenu("&Help");
         help_menu->addAction("&Privacy", this, [this] { show_privacy_notice(); });
@@ -650,8 +698,6 @@ private:
 
         save_button_->setEnabled(controls.save);
         copy_button_->setEnabled(controls.copy);
-        save_action_->setEnabled(controls.save);
-        copy_action_->setEnabled(controls.copy);
         delete_action_->setEnabled(controls.delete_recordings);
         record_action_->setEnabled(controls.start || controls.stop);
         record_action_->setText(controls.stop ? "&Stop Recording" : "&Start Recording");
@@ -659,6 +705,9 @@ private:
 
         history_list_->setEnabled(controls.history);
         history_action_->setEnabled(controls.history);
+        // Leaving the recording screen mid-recording would hide the controls
+        // for the thing still running, so the way out closes while it does.
+        home_from_record_->setEnabled(!ui_state_is_busy(state));
 
         apply_indicator(state);
         explain_disabled_controls(state, controls);
@@ -748,12 +797,22 @@ private:
 
     // ------------------------------------------------------------- history
 
+    void show_home() {
+        if (ui_state_is_busy(state_)) {
+            return;
+        }
+        stack_->setCurrentIndex(0);
+        history_action_->setChecked(false);
+        context_label_->setText("Ready when you are");
+        apply_state(state_);
+    }
+
     void show_library() {
         if (!ui_state_may_start(state_)) {
             return;
         }
         refresh_history();
-        stack_->setCurrentIndex(1);
+        stack_->setCurrentIndex(2);
         // The status bar belongs to whichever screen is showing.
         context_label_->setText(entries_.empty()
             ? QString("No saved transcripts")
@@ -767,15 +826,15 @@ private:
     }
 
     void show_recorder() {
-        stack_->setCurrentIndex(0);
+        stack_->setCurrentIndex(1);
         history_action_->setChecked(false);
         update_context_bar();
         apply_state(state_);
     }
 
     void toggle_library() {
-        if (stack_->currentIndex() == 1) {
-            show_recorder();
+        if (stack_->currentIndex() == 2) {
+            show_home();
         } else {
             show_library();
         }
@@ -1028,7 +1087,7 @@ private:
         transcript_path_ = parts.mid(2).join('|');
         storage_summary_ = transcript_path_;
         update_context_bar();
-        if (stack_->currentIndex() == 1) {
+        if (stack_->currentIndex() == 2) {
             refresh_history();
         }
     }
@@ -1272,6 +1331,8 @@ private:
     QListWidget* history_list_;
     QStackedWidget* stack_;
     QPushButton* back_button_;
+    QPushButton* home_from_record_;
+    QPushButton* go_record_button_;
     QPlainTextEdit* saved_view_;
     QLabel* saved_title_;
     QPushButton* saved_save_;
@@ -1283,8 +1344,6 @@ private:
     QString model_summary_;
     QString input_summary_;
     QString storage_summary_;
-    QAction* save_action_;
-    QAction* copy_action_;
     QAction* delete_action_;
     QAction* record_action_;
     QAction* cancel_action_;

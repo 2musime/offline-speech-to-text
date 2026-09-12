@@ -4,6 +4,39 @@ The Qt6 interface is built as `audio_to_text`. The recorder and Whisper pipeline
 live in `audio_to_text_cli`; the GUI drives that worker with `QProcess` and
 never loads Whisper itself, so the event loop stays free.
 
+## Screens
+
+Three, one job each:
+
+| Screen | Holds | Reached by |
+|---|---|---|
+| **Home** | the application's name, what it does, and one button | where it opens; **← Home** from either other screen |
+| **Recording** | settings, the record panel, the live transcript | **Start a Recording**, or `Ctrl+R` |
+| **Saved transcripts** | the list and a reader | `Transcripts > Saved Transcripts`, or `Ctrl+H` |
+
+Home is deliberately almost empty. It says what the application is and offers
+the one thing someone opening it wants. **Recording does not happen here**: the
+button moves to the recording screen, where the model, microphone and limit are
+chosen first.
+
+Leaving the recording screen is closed off while a recording or transcription is
+running, for the same reason the library is: the controls for the thing still
+running must not be hidden behind another screen.
+
+## Menus
+
+| Menu | Holds |
+|---|---|
+| **Home** | Quit, and nothing else |
+| **Recording** | Start or stop, Cancel |
+| **Transcripts** | Saved Transcripts, Delete All Recordings |
+| **Help** | Privacy, About |
+
+Saving and copying are not in a menu: they act on the transcript in front of
+you, so they sit beside it, keeping their `Ctrl+S` and `Ctrl+Shift+C`
+shortcuts. Deleting every recording is about stored data rather than the
+application, so it sits with the transcripts.
+
 ## Layout
 
 ```text
