@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -O3 -DNDEBUG -shared -Wl,--dependency-file=CMakeFiles/whisper.dir/link.d -Wl,-soname,libwhisper.so.1 -o ../../../bin/libwhisper.so.1.9.4 CMakeFiles/whisper.dir/whisper.cpp.o  -Wl,-rpath,/home/musime/projects/personal/speech-to-text-app/build/bin: ../../../bin/libggml.so.0.23.0 ../../../bin/libggml-cpu.so.0.23.0 ../../../bin/libggml-base.so.0.23.0

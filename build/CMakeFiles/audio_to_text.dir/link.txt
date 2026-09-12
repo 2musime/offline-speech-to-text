@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/audio_to_text.dir/link.d CMakeFiles/audio_to_text.dir/main.cpp.o -o audio_to_text  -Wl,-rpath,/home/musime/projects/personal/speech-to-text-app/build/bin bin/libwhisper.so.1.9.4 -ldl -lm bin/libggml.so.0.23.0 bin/libggml-cpu.so.0.23.0 bin/libggml-base.so.0.23.0
