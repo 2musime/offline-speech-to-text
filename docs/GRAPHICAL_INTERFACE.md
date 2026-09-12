@@ -4,6 +4,43 @@ The Qt6 interface is built as `audio_to_text`. The recorder and Whisper pipeline
 live in `audio_to_text_cli`; the GUI drives that worker with `QProcess` and
 never loads Whisper itself, so the event loop stays free.
 
+## Layout
+
+```text
+File   Help                                          menu bar
+Model [base.en v]  Microphone [default v]  Limit [15s v]  [x] Keep audio files
++-------------------------------------------------------------+
+|  Start Recording   Stop Recording     00:23 / 01:00          |
+|  Recording. Speak now.                                       |
+|  ####################-------------------------              |
++-------------------------------------------------------------+
+Transcript                                        [Save] [Copy]
++-------------------------------------------------------------+
+|                                                             |
++-------------------------------------------------------------+
+base (english, 141.1 MB) . Built-in Audio    Processed on this computer
+```
+
+Four decisions shape this:
+
+**Secondary actions live in the menu bar.** Privacy and About sit under Help,
+and deleting recordings under File. Deleting every recording is destructive and
+belongs somewhere reached deliberately, not beside the microphone selector.
+
+**Settings are sized to their contents.** A two-item model list stretched across
+the window told nobody anything.
+
+**Recording is one panel.** The button, the clock, the status line and the
+progress bar describe a single thing, so they are grouped as one.
+
+**Context lives in the status bar.** The model, input device and output path
+were four stacked labels reading `Model: not loaded`, `Input: not selected`,
+`Saving to: not known yet` before anything had happened, which looks like a list
+of failures. They are now one line, showing only what is actually known.
+
+The progress bar is hidden unless something is running: an empty bar on an idle
+window suggests stalled work.
+
 ## Build and run
 
 ```bash

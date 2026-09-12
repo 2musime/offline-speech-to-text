@@ -5,15 +5,19 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFile>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMainWindow>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProcess>
@@ -22,6 +26,7 @@
 #include <QTimer>
 #include <QTime>
 #include <QTextCursor>
+#include <QStatusBar>
 #include <QVBoxLayout>
 
 class AudioToTextWindow final : public QMainWindow {
@@ -32,13 +37,21 @@ public:
 
         auto* central = new QWidget(this);
         auto* layout = new QVBoxLayout(central);
-        auto* controls = new QHBoxLayout();
+        layout->setSpacing(12);
 
+        build_menus();
+
+        // ---- Settings: sized to their content, not stretched across the window.
         model_selector_ = new QComboBox(central);
         // base.en first, so it is the default: it transcribes roughly 3.5x
         // faster than small.en, which matters most on long recordings.
         model_selector_->addItem("Speed: base.en", "models/ggml-base.en.bin");
         model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
+        model_selector_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+
+        device_selector_ = new QComboBox(central);
+        device_selector_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        device_selector_->setMinimumContentsLength(24);
 
         duration_selector_ = new QComboBox(central);
         duration_selector_->addItem("15 seconds", 15);
@@ -46,70 +59,100 @@ public:
         duration_selector_->addItem("60 seconds", 60);
         duration_selector_->addItem("5 minutes", 300);
         duration_selector_->addItem("10 minutes", 600);
+        duration_selector_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
 
-        start_button_ = new QPushButton("Start Recording", central);
-        stop_button_ = new QPushButton("Stop Recording", central);
-        stop_button_->setEnabled(false);
-
-        controls->addWidget(new QLabel("Model:", central));
-        controls->addWidget(model_selector_, 1);
-        controls->addWidget(new QLabel("Limit:", central));
-        controls->addWidget(duration_selector_);
-        controls->addWidget(start_button_);
-        controls->addWidget(stop_button_);
-        layout->addLayout(controls);
-
-        auto* input_controls = new QHBoxLayout();
-        device_selector_ = new QComboBox(central);
         keep_audio_ = new QCheckBox("Keep audio files", central);
         keep_audio_->setChecked(true);
         keep_audio_->setToolTip("When off, audio is transcribed and discarded; no WAV file is written.");
-        privacy_button_ = new QPushButton("Privacy", central);
-        about_button_ = new QPushButton("About", central);
-        delete_button_ = new QPushButton("Delete recordings", central);
 
-        input_controls->addWidget(new QLabel("Microphone:", central));
-        input_controls->addWidget(device_selector_, 1);
-        input_controls->addWidget(keep_audio_);
-        input_controls->addWidget(privacy_button_);
-        input_controls->addWidget(about_button_);
-        input_controls->addWidget(delete_button_);
-        layout->addLayout(input_controls);
+        auto* settings = new QHBoxLayout();
+        settings->setSpacing(8);
+        settings->addWidget(new QLabel("Model:", central));
+        settings->addWidget(model_selector_);
+        settings->addSpacing(16);
+        settings->addWidget(new QLabel("Microphone:", central));
+        settings->addWidget(device_selector_);
+        settings->addSpacing(16);
+        settings->addWidget(new QLabel("Limit:", central));
+        settings->addWidget(duration_selector_);
+        settings->addSpacing(16);
+        settings->addWidget(keep_audio_);
+        settings->addStretch();
+        layout->addLayout(settings);
 
-        status_label_ = new QLabel("Ready", central);
-        duration_label_ = new QLabel("Duration: 00:00", central);
-        model_label_ = new QLabel("Model: not loaded", central);
-        input_label_ = new QLabel("Input: not selected", central);
-        storage_label_ = new QLabel("Saving to: not known yet", central);
-        storage_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        latency_label_ = new QLabel("", central);
-        progress_ = new QProgressBar(central);
+        // ---- Recording: button, clock, status and progress read as one thing.
+        auto* record_panel = new QGroupBox(central);
+        auto* record_layout = new QVBoxLayout(record_panel);
+        record_layout->setSpacing(8);
+
+        start_button_ = new QPushButton("Start Recording", record_panel);
+        start_button_->setMinimumHeight(36);
+        QFont start_font = start_button_->font();
+        start_font.setBold(true);
+        start_button_->setFont(start_font);
+        stop_button_ = new QPushButton("Stop Recording", record_panel);
+        stop_button_->setMinimumHeight(36);
+        stop_button_->setEnabled(false);
+
+        duration_label_ = new QLabel(record_panel);
+        QFont clock_font = duration_label_->font();
+        clock_font.setPointSize(clock_font.pointSize() + 4);
+        duration_label_->setFont(clock_font);
+
+        auto* record_row = new QHBoxLayout();
+        record_row->addWidget(start_button_);
+        record_row->addWidget(stop_button_);
+        record_row->addSpacing(20);
+        record_row->addWidget(duration_label_);
+        record_row->addStretch();
+        record_layout->addLayout(record_row);
+
+        status_label_ = new QLabel("Ready", record_panel);
+        progress_ = new QProgressBar(record_panel);
         progress_->setTextVisible(false);
         progress_->setRange(0, 100);
         progress_->setValue(0);
-        layout->addWidget(status_label_);
-        layout->addWidget(duration_label_);
-        layout->addWidget(model_label_);
-        layout->addWidget(input_label_);
-        layout->addWidget(storage_label_);
-        layout->addWidget(latency_label_);
-        layout->addWidget(progress_);
+        progress_->setMaximumHeight(8);
+        progress_->hide();
 
-        transcript_ = new QPlainTextEdit(central);
-        transcript_->setPlaceholderText("Transcription will appear here...");
-        transcript_->setReadOnly(true);
-        layout->addWidget(transcript_, 1);
+        auto* status_row = new QHBoxLayout();
+        status_row->addWidget(status_label_, 1);
+        record_layout->addLayout(status_row);
+        record_layout->addWidget(progress_);
 
-        auto* actions = new QHBoxLayout();
+        latency_label_ = new QLabel("", record_panel);
+        latency_label_->setEnabled(false);
+        record_layout->addWidget(latency_label_);
+        layout->addWidget(record_panel);
+
+        // ---- Transcript: the output, and the actions that apply to it.
+        auto* transcript_header = new QHBoxLayout();
+        transcript_header->addWidget(new QLabel("Transcript", central));
+        transcript_header->addStretch();
         save_button_ = new QPushButton("Save", central);
         copy_button_ = new QPushButton("Copy", central);
         save_button_->setEnabled(false);
         copy_button_->setEnabled(false);
-        actions->addStretch();
-        actions->addWidget(save_button_);
-        actions->addWidget(copy_button_);
-        layout->addLayout(actions);
+        transcript_header->addWidget(save_button_);
+        transcript_header->addWidget(copy_button_);
+        layout->addLayout(transcript_header);
+
+        transcript_ = new QPlainTextEdit(central);
+        transcript_->setPlaceholderText(
+            "Choose a microphone, then press Start Recording.\n\n"
+            "Your speech is transcribed on this computer. Nothing is uploaded.");
+        transcript_->setReadOnly(true);
+        layout->addWidget(transcript_, 1);
         setCentralWidget(central);
+
+        // ---- Status bar: context that used to be four stacked labels.
+        context_label_ = new QLabel(this);
+        context_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        statusBar()->addWidget(context_label_, 1);
+        auto* privacy_note = new QLabel("Processed on this computer", this);
+        privacy_note->setEnabled(false);
+        statusBar()->addPermanentWidget(privacy_note);
+        update_context_bar();
 
         process_ = new QProcess(this);
         process_->setProcessChannelMode(QProcess::MergedChannels);
@@ -123,6 +166,9 @@ public:
         processing_timer_->setInterval(1000);
 
         populate_devices();
+        connect(duration_selector_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                [this](int) { refresh_clock(0); });
+        refresh_clock(0);
 
         connect(start_button_, &QPushButton::clicked, this, [this] { start_recording(); });
         connect(stop_button_, &QPushButton::clicked, this, [this] {
@@ -132,13 +178,8 @@ public:
                 cancel_work();
             }
         });
-        connect(copy_button_, &QPushButton::clicked, this, [this] {
-            QApplication::clipboard()->setText(transcript_->toPlainText());
-        });
+        connect(copy_button_, &QPushButton::clicked, this, [this] { copy_transcript(); });
         connect(save_button_, &QPushButton::clicked, this, [this] { save_transcript(); });
-        connect(privacy_button_, &QPushButton::clicked, this, [this] { show_privacy_notice(); });
-        connect(about_button_, &QPushButton::clicked, this, [this] { show_about(); });
-        connect(delete_button_, &QPushButton::clicked, this, [this] { delete_recordings(); });
         connect(process_, &QProcess::readyRead, this, [this] { consume_worker_output(); });
         connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
             if (closing_ || error == QProcess::Crashed) {
@@ -175,8 +216,10 @@ private:
         transcript_->clear();
         final_transcription_.clear();
         transcript_path_.clear();
-        model_label_->setText("Model: validating...");
-        input_label_->setText("Input: opening...");
+        model_summary_ = "Validating model";
+        input_summary_.clear();
+        storage_summary_.clear();
+        update_context_bar();
         latency_label_->clear();
         partial_words_.clear();
         partial_trimmed_ = false;
@@ -215,7 +258,7 @@ private:
         timer_->start();
         limit_timer_->start(limit_seconds_ * 1000);
         apply_state(UiState::Recording);
-        set_status("Recording");
+        set_status("Recording. Speak now.");
         refresh_elapsed();
     }
 
@@ -309,7 +352,8 @@ private:
         }
 
         if (line.startsWith("INPUT|")) {
-            input_label_->setText("Input: " + line.section('|', 1));
+            input_summary_ = line.section('|', 1);
+            update_context_bar();
             return;
         }
 
@@ -340,7 +384,8 @@ private:
 
         if (line.startsWith("DATADIR|")) {
             data_directory_ = line.section('|', 1);
-            storage_label_->setText("Saving to: " + data_directory_);
+            storage_summary_ = data_directory_;
+            update_context_bar();
             return;
         }
 
@@ -371,6 +416,8 @@ private:
                 limit_timer_->stop();
                 chunks_done_ = 0;
                 chunks_total_ = 0;
+                // Live-streaming figures describe a phase that has ended.
+                latency_label_->clear();
                 processing_elapsed_.start();
                 processing_timer_->start();
                 apply_state(UiState::Processing);
@@ -379,6 +426,45 @@ private:
             return;
         }
 
+    }
+
+    // Secondary actions live here rather than in the toolbar. Deleting
+    // recordings is destructive and should be reached deliberately, not brushed
+    // past while choosing a microphone.
+    void build_menus() {
+        QMenu* file_menu = menuBar()->addMenu("&File");
+        save_action_ = file_menu->addAction("&Save Transcript...", this, [this] { save_transcript(); });
+        copy_action_ = file_menu->addAction("&Copy Transcript", this, [this] { copy_transcript(); });
+        file_menu->addSeparator();
+        delete_action_ = file_menu->addAction("&Delete All Recordings...", this,
+                                              [this] { delete_recordings(); });
+        file_menu->addSeparator();
+        file_menu->addAction("&Quit", this, [this] { close(); });
+
+        QMenu* help_menu = menuBar()->addMenu("&Help");
+        help_menu->addAction("&Privacy", this, [this] { show_privacy_notice(); });
+        help_menu->addAction("&About", this, [this] { show_about(); });
+    }
+
+    // One line replacing four stacked labels. Only what is known is shown, so a
+    // fresh window does not read as a list of things that failed.
+    void update_context_bar() {
+        QStringList parts;
+        if (!model_summary_.isEmpty()) {
+            parts << model_summary_;
+        }
+        if (!input_summary_.isEmpty()) {
+            parts << input_summary_;
+        }
+        if (!storage_summary_.isEmpty()) {
+            parts << storage_summary_;
+        }
+        context_label_->setText(parts.isEmpty() ? QString("Ready to record")
+                                                : parts.join("   ·   "));
+    }
+
+    void copy_transcript() {
+        QApplication::clipboard()->setText(transcript_->toPlainText());
     }
 
     // The single place any control's enabled state is decided.
@@ -394,9 +480,16 @@ private:
         duration_selector_->setEnabled(controls.duration);
         device_selector_->setEnabled(controls.device);
         keep_audio_->setEnabled(controls.keep_audio);
-        delete_button_->setEnabled(controls.delete_recordings);
+
         save_button_->setEnabled(controls.save);
         copy_button_->setEnabled(controls.copy);
+        save_action_->setEnabled(controls.save);
+        copy_action_->setEnabled(controls.copy);
+        delete_action_->setEnabled(controls.delete_recordings);
+
+        // Visible only while something is running, so an idle window does not
+        // show a bar that looks like stalled work.
+        progress_->setVisible(ui_state_is_busy(state));
 
         if (controls.progress_indeterminate) {
             // The worker gives no completion fraction for these phases.
@@ -414,15 +507,22 @@ private:
         }
     }
 
+    // Elapsed against the limit, so the limit is visible before you commit to it.
+    void refresh_clock(qint64 seconds) {
+        const int limit = limit_seconds_ > 0 ? limit_seconds_
+                                             : duration_selector_->currentData().toInt();
+        duration_label_->setText(QString("%1 / %2")
+            .arg(QTime(0, 0).addSecs(static_cast<int>(seconds)).toString("mm:ss"),
+                 QTime(0, 0).addSecs(limit).toString("mm:ss")));
+    }
+
     void refresh_elapsed() {
         if (state_ != UiState::Recording) {
             return;
         }
         // Monotonic: unaffected by clock changes or midnight rollover.
         const qint64 seconds = elapsed_.elapsed() / 1000;
-        duration_label_->setText(QString("Duration: %1 of %2")
-            .arg(QTime(0, 0).addSecs(static_cast<int>(seconds)).toString("mm:ss"),
-                 QTime(0, 0).addSecs(limit_seconds_).toString("mm:ss")));
+        refresh_clock(seconds);
         progress_->setValue(static_cast<int>(qMin<qint64>(seconds, limit_seconds_)));
     }
 
@@ -476,8 +576,9 @@ private:
         const QString variant = parts.at(1);
         const QString language = parts.at(2) == "multilingual" ? "multilingual" : "English-only";
         const double megabytes = parts.at(3).toDouble() / (1024.0 * 1024.0);
-        model_label_->setText(QString("Model: %1, %2, %3 MB")
-            .arg(variant, language, QString::number(megabytes, 'f', 1)));
+        model_summary_ = QString("%1 (%2, %3 MB)")
+            .arg(variant, language, QString::number(megabytes, 'f', 1));
+        update_context_bar();
     }
 
     // The worker announces each artefact as SAVED|KIND|path.
@@ -488,7 +589,8 @@ private:
         }
 
         transcript_path_ = parts.mid(2).join('|');
-        storage_label_->setText("Saved to: " + transcript_path_);
+        storage_summary_ = transcript_path_;
+        update_context_bar();
     }
 
     // Worker reports arrive as SEVERITY|CATEGORY|message.
@@ -723,15 +825,16 @@ private:
     QPushButton* copy_button_;
     QLabel* status_label_;
     QLabel* duration_label_;
-    QLabel* model_label_;
-    QLabel* input_label_;
     QLabel* latency_label_;
+    QLabel* context_label_;
+    QString model_summary_;
+    QString input_summary_;
+    QString storage_summary_;
+    QAction* save_action_;
+    QAction* copy_action_;
+    QAction* delete_action_;
     QProgressBar* progress_;
-    QLabel* storage_label_;
     QCheckBox* keep_audio_;
-    QPushButton* privacy_button_;
-    QPushButton* about_button_;
-    QPushButton* delete_button_;
     QString data_directory_;
     QPlainTextEdit* transcript_;
     QProcess* process_;
