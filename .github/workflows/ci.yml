@@ -1,0 +1,144 @@
+# Quality gates for an offline, private transcription application.
+#
+# Runs on GitHub's free ubuntu-latest runners inside a Fedora container, because
+# GitHub hosts no Fedora runner on any plan. A private repository has 2000 free
+# Actions minutes per month, so this is written to stay well inside that: the
+# vendored Whisper build is cached, and no model is ever downloaded.
+
+name: CI
+
+on:
+  push:
+    # main is the production branch and develop is where features integrate.
+    branches: [main, develop, 'feat/**', 'fix/**']
+  pull_request:
+    # Every change reaches main through a pull request, so this is the gate
+    # that actually protects production.
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  # A newer push makes an in-flight run for the same branch pointless.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_DIR: /tmp/ccache
+  CCACHE_MAXSIZE: 500M
+
+jobs:
+  # Costs seconds and needs no compiler, so it fails fast and cheaply on the
+  # mistakes that matter most: a recording, a model, or build output committed.
+  guarantees:
+    name: Repository and style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Nothing private is tracked
+        run: ./tests/check_guarantees.sh
+
+      - name: Formatting
+        run: ./tests/check_style.sh
+
+  build-and-test:
+    name: Build and test (Fedora)
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y install gcc-c++ cmake make git ccache qt6-qtbase-devel \
+            binutils util-linux findutils diffutils
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          # Vendored Whisper dominates build time and changes rarely.
+          key: ccache-fedora-${{ hashFiles('third_party/whisper.cpp/CMakeLists.txt', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-fedora-${{ hashFiles('third_party/whisper.cpp/CMakeLists.txt', 'CMakeLists.txt') }}-
+            ccache-fedora-
+
+      - name: Configure with warnings as errors
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DAUDIO_TO_TEXT_ENABLE_WARNINGS=ON \
+            -DAUDIO_TO_TEXT_WARNINGS_AS_ERRORS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Test
+        # No microphone and no model on the runner. The CLI suite skips itself
+        # when the model is absent rather than reporting a false failure.
+        run: ctest --test-dir build --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: The built program cannot reach the network
+        run: ./tests/check_guarantees.sh "$GITHUB_WORKSPACE/build"
+
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats || true
+
+  sanitizers:
+    name: AddressSanitizer and UndefinedBehaviorSanitizer
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y install gcc-c++ cmake make git ccache qt6-qtbase-devel \
+            libasan libubsan binutils
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          key: ccache-asan-${{ hashFiles('third_party/whisper.cpp/CMakeLists.txt', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-asan-${{ hashFiles('third_party/whisper.cpp/CMakeLists.txt', 'CMakeLists.txt') }}-
+            ccache-asan-
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-sanitize \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DAUDIO_TO_TEXT_ENABLE_SANITIZERS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build instrumented tests
+        run: |
+          cmake --build build-sanitize --parallel $(nproc) \
+            --target audio_to_text_unit_tests audio_to_text_gui_tests
+
+      - name: Unit tests under sanitizers
+        run: ./build-sanitize/audio_to_text_unit_tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+      - name: Interface tests under sanitizers
+        run: ./build-sanitize/audio_to_text_gui_tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          # Qt's own allocations at exit are not this project's leaks.
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
