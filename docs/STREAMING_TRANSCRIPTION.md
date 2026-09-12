@@ -15,7 +15,8 @@ The streaming path:
 5. Drains the worker after recording stops.
 6. Runs the existing final VAD, noise-reduction, and original-versus-cleaned transcription pass.
 
-The overlap reduces word-boundary loss between windows. Partial text is informational and may repeat words at window boundaries; `transcription.txt` is written by the final pass.
+The overlap reduces word-boundary loss between windows. Partial text is informational and may repeat words at window boundaries; the
+transcript file is written by the final pass.
 
 The output also reports worker CPU time. If the ring buffer overflows, the application reports that audio was dropped; reduce the model size or thread count, or use normal mode for longer recordings.
 
