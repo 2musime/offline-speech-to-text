@@ -132,16 +132,26 @@ CMakeFiles/audio_to_text.dir/main.cpp.o: \
  /home/musime/projects/personal/speech-to-text-app/third_party/whisper.cpp/ggml/src/../include/ggml-cpu.h \
  /home/musime/projects/personal/speech-to-text-app/third_party/whisper.cpp/ggml/src/../include/ggml-backend.h \
  /home/musime/projects/personal/speech-to-text-app/third_party/whisper.cpp/ggml/src/../include/ggml-alloc.h \
- /usr/include/c++/16/cstdint /usr/include/c++/16/fstream \
+ /usr/include/c++/16/algorithm /usr/include/c++/16/bits/stl_algo.h \
+ /usr/include/c++/16/bits/algorithmfwd.h \
+ /usr/include/c++/16/initializer_list /usr/include/c++/16/bits/stl_heap.h \
+ /usr/include/c++/16/bits/uniform_int_dist.h \
+ /usr/include/c++/16/bits/stl_tempbuf.h /usr/include/c++/16/new \
+ /usr/include/c++/16/bits/exception.h \
+ /usr/include/c++/16/bits/new_except.h \
+ /usr/include/c++/16/bits/stl_construct.h \
+ /usr/include/c++/16/pstl/glue_algorithm_defs.h \
+ /usr/include/c++/16/pstl/execution_defs.h /usr/include/c++/16/cstdint \
+ /usr/include/c++/16/chrono /usr/include/c++/16/bits/chrono.h \
+ /usr/include/c++/16/ratio /usr/include/c++/16/ctime \
+ /usr/include/c++/16/bits/parse_numbers.h /usr/include/c++/16/fstream \
  /usr/include/c++/16/istream /usr/include/c++/16/ios \
  /usr/include/c++/16/iosfwd /usr/include/c++/16/bits/stringfwd.h \
  /usr/include/c++/16/bits/memoryfwd.h /usr/include/c++/16/bits/postypes.h \
  /usr/include/c++/16/cwchar /usr/include/c++/16/exception \
- /usr/include/c++/16/bits/exception.h \
  /usr/include/c++/16/bits/exception_ptr.h \
  /usr/include/c++/16/bits/cxxabi_init_exception.h \
  /usr/include/c++/16/typeinfo /usr/include/c++/16/bits/hash_bytes.h \
- /usr/include/c++/16/new /usr/include/c++/16/bits/new_except.h \
  /usr/include/c++/16/bits/nested_exception.h \
  /usr/include/c++/16/bits/char_traits.h \
  /usr/include/c++/16/bits/localefwd.h \
@@ -163,11 +173,10 @@ CMakeFiles/audio_to_text.dir/main.cpp.o: \
  /usr/include/c++/16/bits/ostream_insert.h \
  /usr/include/c++/16/bits/cxxabi_forced.h \
  /usr/include/c++/16/bits/range_access.h \
- /usr/include/c++/16/initializer_list /usr/include/c++/16/bits/erase_if.h \
+ /usr/include/c++/16/bits/erase_if.h \
  /usr/include/c++/16/bits/basic_string.h \
  /usr/include/c++/16/ext/alloc_traits.h \
- /usr/include/c++/16/bits/alloc_traits.h \
- /usr/include/c++/16/bits/stl_construct.h /usr/include/c++/16/string_view \
+ /usr/include/c++/16/bits/alloc_traits.h /usr/include/c++/16/string_view \
  /usr/include/c++/16/bits/functional_hash.h \
  /usr/include/c++/16/bits/string_view.tcc \
  /usr/include/c++/16/ext/string_conversions.h /usr/include/c++/16/cstdio \
@@ -198,11 +207,10 @@ CMakeFiles/audio_to_text.dir/main.cpp.o: \
  /usr/include/c++/16/x86_64-redhat-linux/bits/basic_file.h \
  /usr/include/c++/16/x86_64-redhat-linux/bits/c++io.h \
  /usr/include/c++/16/bits/fstream.tcc /usr/include/c++/16/iostream \
- /usr/include/c++/16/mutex /usr/include/c++/16/bits/chrono.h \
- /usr/include/c++/16/ratio /usr/include/c++/16/ctime \
- /usr/include/c++/16/bits/parse_numbers.h \
- /usr/include/c++/16/bits/std_mutex.h \
- /usr/include/c++/16/bits/unique_lock.h /usr/include/c++/16/vector \
+ /usr/include/c++/16/mutex /usr/include/c++/16/bits/std_mutex.h \
+ /usr/include/c++/16/bits/unique_lock.h /usr/include/c++/16/numeric \
+ /usr/include/c++/16/bits/stl_numeric.h \
+ /usr/include/c++/16/pstl/glue_numeric_defs.h /usr/include/c++/16/vector \
  /usr/include/c++/16/bits/stl_uninitialized.h \
  /usr/include/c++/16/bits/stl_vector.h \
  /usr/include/c++/16/bits/stl_bvector.h \
