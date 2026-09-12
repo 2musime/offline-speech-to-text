@@ -381,33 +381,6 @@ bool delete_stored_files(
 // Structured lines are newline-delimited, so text fields must not carry one.
 
 
-// One bounded sink for every recording mode. The audio callback does nothing
-// but copy into the ring buffer and bump counters: no lock, no allocation, no
-// system call, no branch on recording mode.
-struct AudioCapture {
-    AudioRingBuffer buffer;
-    std::atomic<std::size_t> captured_frames{0};
-    std::atomic<std::size_t> dropped_frames{0};
-    std::atomic<bool> device_lost{false};
-    std::atomic<bool> expected_stop{false};
-    std::atomic<bool> finished{false};
-
-    explicit AudioCapture(std::size_t capacity) : buffer(capacity) {}
-
-    void reset() {
-        buffer.reset();
-        captured_frames.store(0, std::memory_order_release);
-        dropped_frames.store(0, std::memory_order_release);
-        device_lost.store(false, std::memory_order_release);
-        expected_stop.store(false, std::memory_order_release);
-        finished.store(false, std::memory_order_release);
-    }
-
-    double dropped_seconds(std::uint32_t sample_rate) const {
-        return static_cast<double>(dropped_frames.load(std::memory_order_acquire)) / sample_rate;
-    }
-};
-
 void capture_callback(ma_device* device, void*, const void* input, ma_uint32 frame_count) {
     if (input == nullptr) {
         return;
@@ -449,26 +422,6 @@ void capture_notification_callback(const ma_device_notification* notification) {
     }
 }
 
-// Moves buffered audio into `samples`, never past `limit`. Runs on a normal
-// thread; the reserved capacity means the insert does not allocate.
-std::size_t drain_capture(
-    AudioCapture& capture,
-    std::vector<std::int16_t>& samples,
-    std::vector<std::int16_t>& scratch,
-    std::size_t limit) {
-    constexpr std::size_t chunk = 4096;
-    std::size_t moved = 0;
-    while (samples.size() < limit) {
-        const std::size_t wanted = std::min(limit - samples.size(), chunk);
-        const std::size_t count = capture.buffer.read(scratch, wanted);
-        if (count == 0) {
-            break;
-        }
-        samples.insert(samples.end(), scratch.begin(), scratch.begin() + count);
-        moved += count;
-    }
-    return moved;
-}
 
 
 
@@ -512,9 +465,17 @@ bool run_transcription(
     const std::vector<SpeechSegment>& segments,
     int thread_count,
     TranscriptionWorkspace& workspace,
-    TranscriptionResult& result) {
+    TranscriptionResult& result,
+    bool report_progress = false) {
     std::string transcription;
     const auto transcription_start = std::chrono::steady_clock::now();
+    std::size_t completed = 0;
+    // A ten minute recording takes minutes to transcribe. Reporting per chunk is
+    // what lets the interface show real progress instead of an indeterminate bar
+    // that is indistinguishable from a hang.
+    if (report_progress) {
+        std::cout << "PROGRESS|0|" << segments.size() << std::endl;
+    }
     for (const SpeechSegment& segment : segments) {
         // Convert straight out of the source range: no intermediate copy, and
         // resize keeps whatever capacity the previous segment left behind.
@@ -540,6 +501,11 @@ bool run_transcription(
         for (int i = 0; i < whisper_full_n_segments(context); ++i) {
             transcription += whisper_full_get_segment_text(context, i);
         }
+
+        ++completed;
+        if (report_progress) {
+            std::cout << "PROGRESS|" << completed << '|' << segments.size() << std::endl;
+        }
     }
 
     result.text = transcription;
@@ -557,7 +523,7 @@ bool transcribe(
     const fs::path& output_path,
     bool retain_transcript) {
     TranscriptionResult result;
-    if (!run_transcription(context, samples, segments, thread_count, workspace, result)) {
+    if (!run_transcription(context, samples, segments, thread_count, workspace, result, true)) {
         return false;
     }
 
@@ -989,17 +955,21 @@ bool parse_options(
             try {
                 duration_seconds = std::stoi(argv[++i]);
             } catch (const std::exception&) {
-                std::cerr << "Duration must be 15, 45, or 60 seconds." << std::endl;
+                std::cerr << "Duration must be 15, 45, 60, 300 or 600 seconds." << std::endl;
                 return false;
             }
-            if (duration_seconds != 15 && duration_seconds != 45 && duration_seconds != 60) {
-                std::cerr << "Duration must be 15, 45, or 60 seconds." << std::endl;
+            // 5 and 10 minute limits exist for dictation. Ten minutes is about
+            // 19 MB of samples, which the bounded buffers handle; the real cost
+            // is transcription time, which is now reported as it happens.
+            if (duration_seconds != 15 && duration_seconds != 45 && duration_seconds != 60 &&
+                duration_seconds != 300 && duration_seconds != 600) {
+                std::cerr << "Duration must be 15, 45, 60, 300 or 600 seconds." << std::endl;
                 return false;
             }
         } else if (argument == "--help" || argument == "-h") {
             std::cout << "Usage:\n"
                       << "  ./build-release/audio_to_text_cli MODEL_PATH [--threads N]\n"
-                      << "      [--duration 15|45|60] [--stream] [--model-dir DIR]\n"
+                      << "      [--duration 15|45|60|300|600] [--stream] [--model-dir DIR]\n"
                       << "      [--device INDEX]\n"
                       << "      [--no-retain-audio] [--no-retain-transcript]\n"
                       << "  ./build-release/audio_to_text_cli --list-devices\n"
@@ -1407,8 +1377,14 @@ int run(int argc, char** argv) {
                 break;
             }
         } else if (context) {
-            const std::vector<SpeechSegment> speech_range{{0, speech.size()}};
-            if (!transcribe(context.get(), speech, speech_range, thread_count, workspace,
+            // Chunked rather than one long call: Whisper's window is 30 seconds
+            // anyway, and chunking is what makes per-chunk progress possible.
+            constexpr std::size_t transcription_chunk = WHISPER_SAMPLE_RATE * 30;
+            std::vector<SpeechSegment> speech_chunks;
+            for (std::size_t begin = 0; begin < speech.size(); begin += transcription_chunk) {
+                speech_chunks.push_back({begin, std::min(begin + transcription_chunk, speech.size())});
+            }
+            if (!transcribe(context.get(), speech, speech_chunks, thread_count, workspace,
                             transcript_path, retain_transcript)) {
                 break;
             }

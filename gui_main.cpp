@@ -35,13 +35,17 @@ public:
         auto* controls = new QHBoxLayout();
 
         model_selector_ = new QComboBox(central);
-        model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
+        // base.en first, so it is the default: it transcribes roughly 3.5x
+        // faster than small.en, which matters most on long recordings.
         model_selector_->addItem("Speed: base.en", "models/ggml-base.en.bin");
+        model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
 
         duration_selector_ = new QComboBox(central);
         duration_selector_->addItem("15 seconds", 15);
         duration_selector_->addItem("45 seconds", 45);
         duration_selector_->addItem("60 seconds", 60);
+        duration_selector_->addItem("5 minutes", 300);
+        duration_selector_->addItem("10 minutes", 600);
 
         start_button_ = new QPushButton("Start Recording", central);
         stop_button_ = new QPushButton("Stop Recording", central);
@@ -113,11 +117,21 @@ public:
         timer_->setInterval(250);
         limit_timer_ = new QTimer(this);
         limit_timer_->setSingleShot(true);
+        // Refreshes the elapsed figure while a long transcription runs, so the
+        // display keeps moving between chunk reports.
+        processing_timer_ = new QTimer(this);
+        processing_timer_->setInterval(1000);
 
         populate_devices();
 
         connect(start_button_, &QPushButton::clicked, this, [this] { start_recording(); });
-        connect(stop_button_, &QPushButton::clicked, this, [this] { stop_recording(); });
+        connect(stop_button_, &QPushButton::clicked, this, [this] {
+            if (state_ == UiState::Recording) {
+                stop_recording();
+            } else {
+                cancel_work();
+            }
+        });
         connect(copy_button_, &QPushButton::clicked, this, [this] {
             QApplication::clipboard()->setText(transcript_->toPlainText());
         });
@@ -135,6 +149,7 @@ public:
         connect(process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
                 this, [this](int exit_code, QProcess::ExitStatus status) { handle_worker_exit(exit_code, status); });
         connect(timer_, &QTimer::timeout, this, [this] { refresh_elapsed(); });
+        connect(processing_timer_, &QTimer::timeout, this, [this] { report_transcription_progress(); });
         connect(limit_timer_, &QTimer::timeout, this, [this] {
             if (state_ != UiState::Recording) {
                 return;
@@ -167,6 +182,9 @@ private:
         partial_trimmed_ = false;
         completed_ = false;
         error_shown_ = false;
+        cancelled_ = false;
+        chunks_done_ = 0;
+        chunks_total_ = 0;
         const QString model = model_selector_->currentData().toString();
         const QString duration = duration_selector_->currentData().toString();
         // No --threads: the worker's measured default is the single source of truth.
@@ -199,6 +217,51 @@ private:
         apply_state(UiState::Recording);
         set_status("Recording");
         refresh_elapsed();
+    }
+
+    // Shows how much is done and how long it has taken, so a long wait reads
+    // as work rather than as a freeze.
+    void report_transcription_progress() {
+        if (state_ != UiState::Processing || chunks_total_ <= 0) {
+            return;
+        }
+        progress_->setRange(0, chunks_total_);
+        progress_->setValue(chunks_done_);
+
+        const qint64 seconds = processing_elapsed_.isValid() ? processing_elapsed_.elapsed() / 1000 : 0;
+        QString status = QString("Transcribing %1 of %2").arg(chunks_done_).arg(chunks_total_);
+        if (seconds > 0) {
+            status += QString(" (%1s elapsed").arg(seconds);
+            // Once a chunk is done the remainder can be estimated honestly.
+            if (chunks_done_ > 0 && chunks_done_ < chunks_total_) {
+                const qint64 remaining = seconds * (chunks_total_ - chunks_done_) / chunks_done_;
+                status += QString(", about %1s left").arg(remaining);
+            }
+            status += ")";
+        }
+        set_status(status);
+    }
+
+    // Abandons whatever the worker is doing. Available while loading, stopping
+    // and transcribing, so no phase is a dead end.
+    void cancel_work() {
+        if (!ui_state_is_busy(state_)) {
+            return;
+        }
+        timer_->stop();
+        limit_timer_->stop();
+        processing_timer_->stop();
+        set_status("Cancelling...");
+        if (process_->state() != QProcess::NotRunning) {
+            process_->write("q\n");
+            if (!process_->waitForFinished(2000)) {
+                process_->kill();
+                process_->waitForFinished(1000);
+            }
+        }
+        cancelled_ = true;
+        apply_state(UiState::Ready);
+        set_status("Cancelled. Start recording to try again.");
     }
 
     void stop_recording() {
@@ -265,8 +328,10 @@ private:
             // Completion is keyed off the transcription itself, not off a file
             // being written, so it still works when retention is off.
             completed_ = true;
+            processing_timer_->stop();
             apply_state(UiState::Completed);
-            set_status("Transcription complete");
+            set_status(QString("Transcription complete (%1s)")
+                .arg(processing_elapsed_.isValid() ? processing_elapsed_.elapsed() / 1000 : 0));
             if (process_->state() == QProcess::Running) {
                 process_->write("q\n");
             }
@@ -276,6 +341,16 @@ private:
         if (line.startsWith("DATADIR|")) {
             data_directory_ = line.section('|', 1);
             storage_label_->setText("Saving to: " + data_directory_);
+            return;
+        }
+
+        if (line.startsWith("PROGRESS|")) {
+            const QStringList parts = line.split('|');
+            if (parts.size() >= 3) {
+                chunks_done_ = parts.at(1).toInt();
+                chunks_total_ = parts.at(2).toInt();
+                report_transcription_progress();
+            }
             return;
         }
 
@@ -294,8 +369,12 @@ private:
             if (state_ == UiState::Stopping || state_ == UiState::Recording) {
                 timer_->stop();
                 limit_timer_->stop();
+                chunks_done_ = 0;
+                chunks_total_ = 0;
+                processing_elapsed_.start();
+                processing_timer_->start();
                 apply_state(UiState::Processing);
-                set_status("Transcribing...");
+                set_status("Preparing audio...");
             }
             return;
         }
@@ -309,7 +388,8 @@ private:
         const bool has_text = !transcript_->toPlainText().trimmed().isEmpty();
         const ControlStates controls = controls_for(state, devices_ready_, has_text);
         start_button_->setEnabled(controls.start);
-        stop_button_->setEnabled(controls.stop);
+        stop_button_->setEnabled(controls.stop || controls.cancel);
+        stop_button_->setText(controls.cancel ? "Cancel" : "Stop Recording");
         model_selector_->setEnabled(controls.model);
         duration_selector_->setEnabled(controls.duration);
         device_selector_->setEnabled(controls.device);
@@ -323,6 +403,11 @@ private:
             progress_->setRange(0, 0);
         } else if (state == UiState::Recording) {
             progress_->setRange(0, limit_seconds_ > 0 ? limit_seconds_ : 100);
+        } else if (state == UiState::Processing) {
+            // Filled in by PROGRESS| reports; start indeterminate only until
+            // the first one arrives.
+            progress_->setRange(0, chunks_total_ > 0 ? chunks_total_ : 0);
+            progress_->setValue(chunks_done_);
         } else {
             progress_->setRange(0, 100);
             progress_->setValue(0);
@@ -450,6 +535,11 @@ private:
 
     void handle_worker_exit(int exit_code, QProcess::ExitStatus status) {
         if (closing_) {
+            return;
+        }
+        if (cancelled_) {
+            // We asked it to stop, and may have killed it. That is not a crash,
+            // and the message already on screen is the accurate one.
             return;
         }
         if (error_shown_) {
@@ -647,6 +737,7 @@ private:
     QProcess* process_;
     QTimer* timer_;
     QTimer* limit_timer_;
+    QTimer* processing_timer_;
     QElapsedTimer elapsed_;
     UiState state_ = UiState::Ready;
     int limit_seconds_ = 0;
@@ -661,6 +752,10 @@ private:
     bool completed_ = false;
     bool closing_ = false;
     bool error_shown_ = false;
+    bool cancelled_ = false;
+    int chunks_done_ = 0;
+    int chunks_total_ = 0;
+    QElapsedTimer processing_elapsed_;
 };
 
 int main(int argc, char* argv[]) {

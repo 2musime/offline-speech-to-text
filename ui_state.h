@@ -17,6 +17,9 @@ enum class UiState {
 struct ControlStates {
     bool start = false;
     bool stop = false;
+    // Abandoning work in progress. A ten minute recording can take minutes to
+    // transcribe, and a user must never be left with no way out of a wait.
+    bool cancel = false;
     bool model = false;
     bool duration = false;
     bool device = false;
@@ -63,6 +66,8 @@ inline ControlStates controls_for(UiState state, bool devices_ready, bool has_te
     ControlStates controls;
     controls.start = idle;
     controls.stop = state == UiState::Recording;
+    controls.cancel = state == UiState::LoadingModel || state == UiState::Stopping ||
+        state == UiState::Processing;
     // Changing these mid-run would not affect the worker already running.
     controls.model = idle;
     controls.duration = idle;
@@ -72,7 +77,10 @@ inline ControlStates controls_for(UiState state, bool devices_ready, bool has_te
     controls.delete_recordings = idle;
     controls.save = state == UiState::Completed || (state == UiState::Error && has_text);
     controls.copy = controls.save;
+    // Processing is deliberately absent: the worker reports how many chunks it
+    // has finished, so that phase shows real progress rather than a bar that
+    // moves without meaning.
     controls.progress_indeterminate = state == UiState::LoadingModel ||
-        state == UiState::Stopping || state == UiState::Processing;
+        state == UiState::Stopping;
     return controls;
 }

@@ -37,6 +37,20 @@ WARN|RECORDING|Reached the 15 second limit or could not keep up; 4800 frames (0.
 A count above zero means either the recording hit its limit or the consumer
 could not keep up with the device.
 
+### Draining is unconditional
+
+The drain always empties the ring buffer, including after the duration limit is
+reached. Samples past the limit are consumed and discarded rather than left
+behind.
+
+This is not a detail. The streaming worker's loop runs while
+`capture.buffer.available() > 0`. An earlier version stopped draining once the
+kept samples reached the limit, so a recording that hit its limit left audio in
+the buffer permanently: the worker spun forever, `join` never returned, the
+final transcription never started, and the interface sat on a progress bar that
+moved with nothing behind it. `tests/unit_tests.cpp` asserts the buffer is empty
+after draining past the limit.
+
 ## Device disconnects and interruptions
 
 The device is opened with a notification callback. A reroute, a system

@@ -103,6 +103,7 @@ void test_state_transitions() {
     const ControlStates loading = controls_for(UiState::LoadingModel, true, false);
     CHECK_FALSE("start is withdrawn while loading", loading.start);
     CHECK_FALSE("stop is not yet available while loading", loading.stop);
+    CHECK("loading can be cancelled", loading.cancel);
     CHECK("progress is indeterminate while loading", loading.progress_indeterminate);
 
     const ControlStates recording = controls_for(UiState::Recording, true, false);
@@ -116,12 +117,16 @@ void test_state_transitions() {
 
     const ControlStates stopping = controls_for(UiState::Stopping, true, false);
     CHECK_FALSE("stop is withdrawn once pressed", stopping.stop);
+    CHECK("stopping can be cancelled", stopping.cancel);
     CHECK("progress is indeterminate while stopping", stopping.progress_indeterminate);
 
     const ControlStates processing = controls_for(UiState::Processing, true, false);
     CHECK_FALSE("the model cannot change while processing", processing.model);
     CHECK_FALSE("deletion cannot race processing", processing.delete_recordings);
-    CHECK("progress is indeterminate while processing", processing.progress_indeterminate);
+    // A ten minute recording takes minutes to transcribe; the user must be able
+    // to abandon it, and must see real progress rather than a spinning bar.
+    CHECK("a long transcription can be cancelled", processing.cancel);
+    CHECK_FALSE("progress is measured while transcribing", processing.progress_indeterminate);
 
     const ControlStates completed = controls_for(UiState::Completed, true, true);
     CHECK("start returns after completion", completed.start);
@@ -142,13 +147,21 @@ void test_state_transitions() {
     CHECK("other settings do not wait for enumeration",
           controls_for(UiState::Ready, false, false).model);
 
-    // Start and stop are never both offered.
+    // Invariants that must hold in every state.
     for (const UiState state : {UiState::Ready, UiState::LoadingModel, UiState::Recording,
                                 UiState::Stopping, UiState::Processing, UiState::Completed,
                                 UiState::Error}) {
         const ControlStates controls = controls_for(state, true, true);
         harness::record(!(controls.start && controls.stop),
                         "start and stop are mutually exclusive", ui_state_name(state));
+        harness::record(!(controls.stop && controls.cancel),
+                        "stop and cancel never both apply", ui_state_name(state));
+        // The button is shared, so every busy state must offer one or the other:
+        // no phase may leave the user with nothing to press.
+        harness::record(!ui_state_is_busy(state) || controls.stop || controls.cancel,
+                        "every busy state offers a way out", ui_state_name(state));
+        harness::record(ui_state_is_busy(state) || !controls.cancel,
+                        "cancel is offered only while busy", ui_state_name(state));
     }
 }
 

@@ -98,6 +98,33 @@ Closing while `LoadingModel`, `Recording`, `Stopping` or `Processing` asks for
 confirmation, because the transcript would be lost. On confirmation the worker
 is asked to quit, given three seconds, then killed.
 
+## Long recordings
+
+Limits are 15, 45 and 60 seconds, and 5 or 10 minutes for dictation. `base.en`
+is the default model because it transcribes roughly 3.5 times faster than
+`small.en`, which is what decides whether a ten minute recording takes about a
+minute to transcribe or several.
+
+The final pass is chunked, and the worker reports each chunk as it finishes:
+
+```text
+PROGRESS|7|20
+```
+
+The interface turns that into a filling bar and a line naming what is left:
+
+```text
+Transcribing 7 of 20 (41s elapsed, about 76s left)
+```
+
+The estimate is derived from chunks already finished, so it appears only once
+there is something to base it on.
+
+**Cancelling.** The Stop button becomes **Cancel** while the worker is loading,
+stopping or transcribing. No phase is a dead end: a ten minute recording can
+take minutes to transcribe, and a wait with no way out is indistinguishable from
+a hang.
+
 ## Live text
 
 Partial text arrives as `PARTIAL|latency_ms|queue_seconds|text` and is merged by
