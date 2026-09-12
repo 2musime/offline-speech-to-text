@@ -78,6 +78,7 @@ add_executable(audio_to_text
 )
 
 target_include_directories(audio_to_text PRIVATE
+    .
     "${CMAKE_BINARY_DIR}/generated"
 )
 

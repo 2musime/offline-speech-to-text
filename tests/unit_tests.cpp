@@ -4,6 +4,7 @@
 #include "file_storage.h"
 #include "model_info.h"
 #include "speech_detection.h"
+#include "transcript_library.h"
 #include "wav_io.h"
 
 #include <atomic>
@@ -497,6 +498,224 @@ void test_file_write_failures() {
     CHECK("session stamps have the expected shape", session_stamp().size() == 20);
 }
 
+// ------------------------------------------------------------- transcripts
+
+// Writes a transcript with the given stamp, returning its path.
+fs::path write_transcript(const fs::path& directory, const std::string& stamp,
+                          const std::string& body) {
+    std::error_code error;
+    fs::create_directories(directory, error);
+    const fs::path path = directory / (stamp + "-transcription.txt");
+    std::ofstream(path) << body;
+    return path;
+}
+
+void test_stamp_parsing() {
+    harness::begin("Session stamp parsing");
+
+    SessionStamp stamp;
+    CHECK("a well formed stamp parses", parse_session_stamp("20260912-222240-04c4", stamp));
+    CHECK_EQ("year", stamp.when.tm_year + 1900, 2026);
+    CHECK_EQ("month", stamp.when.tm_mon + 1, 9);
+    CHECK_EQ("day", stamp.when.tm_mday, 12);
+    CHECK_EQ("hour", stamp.when.tm_hour, 22);
+    CHECK_EQ("minute", stamp.when.tm_min, 22);
+    CHECK_EQ("second", stamp.when.tm_sec, 40);
+    CHECK_TEXT("the text is kept verbatim", stamp.text, "20260912-222240-04c4");
+
+    // Malformed input must be refused, never guessed at.
+    const char* rejected[] = {
+        "",                      // empty
+        "20260912-222240",       // truncated
+        "20260912-222240-04c45", // too long
+        "20260912_222240_04c4",  // wrong separators
+        "2026091a-222240-04c4",  // letter in the date
+        "20260912-2222g0-04c4",  // letter in the time
+        "20260912-222240-zzzz",  // non-hex suffix
+        "20261312-222240-04c4",  // month 13
+        "20260932-222240-04c4",  // day 32
+        "20260912-252240-04c4",  // hour 25
+        "20260912-226240-04c4",  // minute 62
+        "not-a-stamp-at-all??",  // right length, wrong everything
+    };
+    for (const char* text : rejected) {
+        SessionStamp ignored;
+        harness::record(!parse_session_stamp(text, ignored),
+                        "malformed stamp is refused", std::string("\"") + text + "\"");
+    }
+
+    // Ordering is lexical on a fixed-width stamp, which is also chronological.
+    SessionStamp older;
+    SessionStamp newer;
+    CHECK("older parses", parse_session_stamp("20260912-090000-aaaa", older));
+    CHECK("newer parses", parse_session_stamp("20260912-100000-aaaa", newer));
+    CHECK("stamps order chronologically", older < newer);
+    CHECK_FALSE("ordering is not reversed", newer < older);
+}
+
+void test_listing_transcripts() {
+    harness::begin("Listing transcripts");
+
+    const fs::path root = scratch_directory() / "library";
+    const fs::path transcripts = root / "transcripts";
+    std::error_code error;
+    fs::remove_all(root, error);
+
+    CHECK("an absent directory lists nothing", list_transcripts(root).empty());
+    fs::create_directories(transcripts, error);
+    CHECK("an empty directory lists nothing", list_transcripts(root).empty());
+
+    write_transcript(transcripts, "20260912-090000-aaaa", "first recording\n");
+    write_transcript(transcripts, "20260912-100000-bbbb", "second recording\n");
+    write_transcript(transcripts, "20260911-235959-cccc", "from the night before\n");
+
+    // Files the application did not write must be skipped, not break the list.
+    std::ofstream(transcripts / "notes.txt") << "hand written";
+    std::ofstream(transcripts / "bad-stamp-transcription.txt") << "wrong shape";
+    std::ofstream(transcripts / "20260912-090000-aaaa.wav") << "wrong suffix";
+    fs::create_directories(transcripts / "20260912-120000-dddd-transcription.txt", error);
+
+    const std::vector<TranscriptEntry> entries = list_transcripts(root);
+    CHECK_EQ("only well formed transcripts are listed", entries.size(), std::size_t{3});
+    if (entries.size() == 3) {
+        CHECK_TEXT("newest is first", entries[0].stamp.text, "20260912-100000-bbbb");
+        CHECK_TEXT("then the next newest", entries[1].stamp.text, "20260912-090000-aaaa");
+        CHECK_TEXT("oldest is last", entries[2].stamp.text, "20260911-235959-cccc");
+        CHECK_TEXT("the preview is the first line", entries[0].preview, "second recording");
+        CHECK("the size is recorded", entries[0].size_bytes > 0);
+    }
+}
+
+void test_preview_truncation() {
+    harness::begin("Transcript previews");
+
+    const fs::path root = scratch_directory() / "previews";
+    const fs::path transcripts = root / "transcripts";
+
+    const std::string lengthy(transcript_preview_length + 80, 'x');
+    write_transcript(transcripts, "20260912-110000-aaaa", lengthy + "\n");
+    write_transcript(transcripts, "20260912-110001-bbbb", "   padded with space   \n");
+    write_transcript(transcripts, "20260912-110002-cccc", "");
+    write_transcript(transcripts, "20260912-110003-dddd", "   \n\nsecond line\n");
+    write_transcript(transcripts, "20260912-110004-eeee", "first line\nsecond line\n");
+
+    const std::vector<TranscriptEntry> entries = list_transcripts(root);
+    CHECK_EQ("all five are listed", entries.size(), std::size_t{5});
+
+    const auto preview_for = [&entries](const std::string& stamp) {
+        for (const TranscriptEntry& entry : entries) {
+            if (entry.stamp.text == stamp) {
+                return entry.preview;
+            }
+        }
+        return std::string("<missing>");
+    };
+
+    const std::string truncated = preview_for("20260912-110000-aaaa");
+    CHECK_EQ("a long line is capped", truncated.size(), transcript_preview_length + 3);
+    CHECK("truncation is marked", truncated.rfind("...") == transcript_preview_length);
+    CHECK_TEXT("surrounding space is trimmed", preview_for("20260912-110001-bbbb"),
+               "padded with space");
+    CHECK_TEXT("an empty file previews as nothing", preview_for("20260912-110002-cccc"), "");
+    CHECK_TEXT("a blank first line previews as nothing",
+               preview_for("20260912-110003-dddd"), "");
+    CHECK_TEXT("only the first line is used", preview_for("20260912-110004-eeee"), "first line");
+}
+
+void test_reading_and_deleting() {
+    harness::begin("Reading and deleting transcripts");
+
+    const fs::path root = scratch_directory() / "readback";
+    const fs::path transcripts = root / "transcripts";
+    const fs::path path = write_transcript(transcripts, "20260912-130000-aaaa",
+                                           "the quick brown fox\n");
+
+    std::string text;
+    std::string reason;
+    CHECK("a stored transcript reads back", read_transcript(path, root, text, reason));
+    CHECK_TEXT("the content is intact", text, "the quick brown fox\n");
+
+    CHECK_FALSE("a missing file is refused",
+                read_transcript(transcripts / "20260912-140000-bbbb-transcription.txt",
+                                root, text, reason));
+
+    // Escaping the data directory must fail even when the target exists.
+    const fs::path outside = scratch_directory() / "outside-transcript.txt";
+    std::ofstream(outside) << "should not be readable";
+    CHECK_FALSE("a path outside the directory is refused",
+                read_transcript(outside, root, text, reason));
+    CHECK("the reason says why", reason.find("outside") != std::string::npos);
+    CHECK_FALSE("traversal out and back is refused",
+                read_transcript(transcripts / ".." / ".." / "outside-transcript.txt",
+                                root, text, reason));
+
+    // A link inside the directory pointing out of it must not be followed.
+    std::error_code error;
+    const fs::path link = transcripts / "20260912-150000-cccc-transcription.txt";
+    fs::create_symlink(outside, link, error);
+    if (!error) {
+        CHECK_FALSE("a symbolic link is refused", read_transcript(link, root, text, reason));
+        CHECK("a link is not listed", list_transcripts(root).size() == 1);
+        CHECK_FALSE("a link cannot be deleted through",
+                    delete_transcript(link, root, reason));
+        CHECK("the link's target survives", fs::exists(outside));
+        fs::remove(link, error);
+    }
+
+    // A file that cannot be read still lists, with an empty preview.
+    const fs::path unreadable = write_transcript(transcripts, "20260912-160000-dddd", "secret\n");
+    fs::permissions(unreadable, fs::perms::none, error);
+    if (!error) {
+        const std::vector<TranscriptEntry> entries = list_transcripts(root);
+        bool found = false;
+        for (const TranscriptEntry& entry : entries) {
+            if (entry.stamp.text == "20260912-160000-dddd") {
+                found = true;
+                CHECK_TEXT("an unreadable file previews as nothing", entry.preview, "");
+            }
+        }
+        CHECK("an unreadable file is still listed", found);
+        fs::permissions(unreadable, fs::perms::owner_read | fs::perms::owner_write, error);
+    }
+
+    CHECK_FALSE("deleting outside the directory is refused",
+                delete_transcript(outside, root, reason));
+    CHECK("the outside file survives", fs::exists(outside));
+    CHECK("a stored transcript deletes", delete_transcript(path, root, reason));
+    CHECK_FALSE("it is gone afterwards", fs::exists(path));
+    CHECK_FALSE("deleting it twice fails", delete_transcript(path, root, reason));
+}
+
+void test_companion_audio() {
+    harness::begin("Companion audio");
+
+    const fs::path root = scratch_directory() / "companions";
+    const fs::path recordings = root / "recordings";
+    std::error_code error;
+    fs::create_directories(recordings, error);
+
+    SessionStamp stamp;
+    CHECK("stamp parses", parse_session_stamp("20260912-170000-aaaa", stamp));
+
+    CompanionAudio audio = companion_audio(stamp, root);
+    CHECK_FALSE("nothing is reported when no audio was kept", audio.any());
+    CHECK_TEXT("the expected name is still resolved", audio.recording.filename().string(),
+               "20260912-170000-aaaa-recording.wav");
+
+    std::ofstream(recordings / "20260912-170000-aaaa-recording.wav") << "x";
+    std::ofstream(recordings / "20260912-170000-aaaa-speech.wav") << "x";
+    audio = companion_audio(stamp, root);
+    CHECK("the raw recording is found", audio.has_recording);
+    CHECK("the speech extract is found", audio.has_speech);
+    CHECK_FALSE("the cleaned copy is correctly absent", audio.has_cleaned);
+    CHECK("something is reported", audio.any());
+
+    // A different session must not pick up these files.
+    SessionStamp other;
+    CHECK("another stamp parses", parse_session_stamp("20260912-180000-bbbb", other));
+    CHECK_FALSE("audio is not shared between sessions", companion_audio(other, root).any());
+}
+
 }  // namespace
 
 int main() {
@@ -511,5 +730,10 @@ int main() {
     test_ring_buffer_overflow();
     test_drain_past_the_limit();
     test_file_write_failures();
+    test_stamp_parsing();
+    test_listing_transcripts();
+    test_preview_truncation();
+    test_reading_and_deleting();
+    test_companion_audio();
     return harness::summary();
 }
