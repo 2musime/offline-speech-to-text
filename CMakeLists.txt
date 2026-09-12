@@ -63,3 +63,29 @@ if(AUDIO_TO_TEXT_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
     target_compile_options(audio_to_text_cli PRIVATE ${AUDIO_TO_TEXT_SANITIZER_FLAGS})
     target_link_options(audio_to_text_cli PRIVATE ${AUDIO_TO_TEXT_SANITIZER_FLAGS})
 endif()
+
+enable_testing()
+
+add_executable(audio_to_text_unit_tests tests/unit_tests.cpp)
+target_include_directories(audio_to_text_unit_tests PRIVATE . tests third_party)
+target_link_libraries(audio_to_text_unit_tests PRIVATE whisper Threads::Threads)
+
+add_executable(audio_to_text_gui_tests tests/gui_tests.cpp)
+target_include_directories(audio_to_text_gui_tests PRIVATE . tests)
+target_link_libraries(audio_to_text_gui_tests PRIVATE Qt6::Core)
+
+add_test(NAME unit COMMAND audio_to_text_unit_tests)
+add_test(NAME gui COMMAND audio_to_text_gui_tests)
+add_test(NAME cli COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_tests.sh $<TARGET_FILE:audio_to_text_cli>)
+
+if(AUDIO_TO_TEXT_ENABLE_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(audio_to_text_unit_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(audio_to_text_gui_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(AUDIO_TO_TEXT_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(audio_to_text_unit_tests PRIVATE ${AUDIO_TO_TEXT_SANITIZER_FLAGS})
+    target_link_options(audio_to_text_unit_tests PRIVATE ${AUDIO_TO_TEXT_SANITIZER_FLAGS})
+    target_compile_options(audio_to_text_gui_tests PRIVATE ${AUDIO_TO_TEXT_SANITIZER_FLAGS})
+    target_link_options(audio_to_text_gui_tests PRIVATE ${AUDIO_TO_TEXT_SANITIZER_FLAGS})
+endif()
