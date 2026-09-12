@@ -1,4 +1,5 @@
 #include "partial_text.h"
+#include "ui_state.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -21,17 +22,6 @@
 #include <QTime>
 #include <QTextCursor>
 #include <QVBoxLayout>
-
-// Every control's enabled state is a function of this, and of nothing else.
-enum class UiState {
-    Ready,
-    LoadingModel,
-    Recording,
-    Stopping,
-    Processing,
-    Completed,
-    Error
-};
 
 class AudioToTextWindow final : public QMainWindow {
 public:
@@ -156,7 +146,7 @@ private:
     void start_recording() {
         // Only these states may begin a recording, so a second click, a stray
         // shortcut, or a timer cannot start a concurrent worker.
-        if (state_ != UiState::Ready && state_ != UiState::Completed && state_ != UiState::Error) {
+        if (!ui_state_may_start(state_)) {
             return;
         }
         if (process_->state() != QProcess::NotRunning) {
@@ -312,37 +302,26 @@ private:
     void apply_state(UiState state) {
         state_ = state;
 
-        const bool idle = state == UiState::Ready || state == UiState::Completed ||
-            state == UiState::Error;
-        start_button_->setEnabled(idle);
-        stop_button_->setEnabled(state == UiState::Recording);
-        // Changing the model or device mid-run would not affect the worker that
-        // is already running, so the controls stay locked until it finishes.
-        model_selector_->setEnabled(idle);
-        duration_selector_->setEnabled(idle);
-        device_selector_->setEnabled(idle && devices_ready_);
-        keep_audio_->setEnabled(idle);
-        // Deleting while the worker holds the directory open would race it.
-        delete_button_->setEnabled(idle);
-
         const bool has_text = !transcript_->toPlainText().trimmed().isEmpty();
-        save_button_->setEnabled(state == UiState::Completed || (state == UiState::Error && has_text));
-        copy_button_->setEnabled(save_button_->isEnabled());
+        const ControlStates controls = controls_for(state, devices_ready_, has_text);
+        start_button_->setEnabled(controls.start);
+        stop_button_->setEnabled(controls.stop);
+        model_selector_->setEnabled(controls.model);
+        duration_selector_->setEnabled(controls.duration);
+        device_selector_->setEnabled(controls.device);
+        keep_audio_->setEnabled(controls.keep_audio);
+        delete_button_->setEnabled(controls.delete_recordings);
+        save_button_->setEnabled(controls.save);
+        copy_button_->setEnabled(controls.copy);
 
-        switch (state) {
-            case UiState::LoadingModel:
-            case UiState::Stopping:
-            case UiState::Processing:
-                // Indeterminate: the worker gives no progress fraction here.
-                progress_->setRange(0, 0);
-                break;
-            case UiState::Recording:
-                progress_->setRange(0, limit_seconds_ > 0 ? limit_seconds_ : 100);
-                break;
-            default:
-                progress_->setRange(0, 100);
-                progress_->setValue(0);
-                break;
+        if (controls.progress_indeterminate) {
+            // The worker gives no completion fraction for these phases.
+            progress_->setRange(0, 0);
+        } else if (state == UiState::Recording) {
+            progress_->setRange(0, limit_seconds_ > 0 ? limit_seconds_ : 100);
+        } else {
+            progress_->setRange(0, 100);
+            progress_->setValue(0);
         }
     }
 
@@ -590,9 +569,7 @@ private:
     }
 
     void closeEvent(QCloseEvent* event) override {
-        const bool busy = state_ == UiState::Recording || state_ == UiState::Stopping ||
-            state_ == UiState::Processing || state_ == UiState::LoadingModel;
-        if (busy) {
+        if (ui_state_is_busy(state_)) {
             const auto choice = QMessageBox::question(this, "Recording in progress",
                 "A recording is still being transcribed. Closing now discards it.\n\nClose anyway?",
                 QMessageBox::Close | QMessageBox::Cancel, QMessageBox::Cancel);
