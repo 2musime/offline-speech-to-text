@@ -1,3 +1,5 @@
+#include "partial_text.h"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
@@ -58,10 +60,12 @@ public:
         duration_label_ = new QLabel("Duration: 00:00", central);
         model_label_ = new QLabel("Model: not loaded", central);
         input_label_ = new QLabel("Input: not selected", central);
+        latency_label_ = new QLabel("", central);
         layout->addWidget(status_label_);
         layout->addWidget(duration_label_);
         layout->addWidget(model_label_);
         layout->addWidget(input_label_);
+        layout->addWidget(latency_label_);
 
         transcript_ = new QPlainTextEdit(central);
         transcript_->setPlaceholderText("Transcription will appear here...");
@@ -124,6 +128,9 @@ private:
         transcript_path_.clear();
         model_label_->setText("Model: validating...");
         input_label_->setText("Input: opening...");
+        latency_label_->clear();
+        partial_words_.clear();
+        partial_trimmed_ = false;
         completed_ = false;
         error_shown_ = false;
         const QString model = model_selector_->currentData().toString();
@@ -195,27 +202,26 @@ private:
             return;
         }
 
-        if (!pending_text_label_.isEmpty()) {
-            if (pending_text_label_ == "partial") {
-                append_partial_text(line);
-            } else if (pending_text_label_ == "final") {
-                final_transcription_ = line;
-                render_final_transcription();
-            } else {
-                transcript_->setPlainText(line);
+        if (line.startsWith("PARTIAL|")) {
+            const QStringList parts = line.split('|');
+            if (parts.size() >= 4) {
+                append_partial_text(parts.mid(3).join('|'),
+                                    parts.at(1).toLongLong(), parts.at(2).toDouble());
             }
-            pending_text_label_.clear();
             return;
         }
 
-        if (line.startsWith("Partial (")) {
-            pending_text_label_ = "partial";
+        if (line.startsWith("FINAL|")) {
+            final_transcription_ = line.section('|', 1);
+            render_final_transcription();
             return;
         }
-        if (line == "Transcription:") {
-            pending_text_label_ = "final";
+
+        if (line.startsWith("STREAMSTATS|")) {
+            handle_stream_stats(line);
             return;
         }
+
     }
 
     // Asks the worker to enumerate capture devices before any recording starts.
@@ -291,7 +297,6 @@ private:
             return;
         }
 
-        pending_text_label_.clear();
         error_shown_ = true;
         set_idle(actionable_message(category, message));
         if (process_->state() == QProcess::Running) {
@@ -338,42 +343,36 @@ private:
         set_idle(completed_ ? "Transcription complete" : "Ready");
     }
 
-    void append_partial_text(const QString& incoming) {
-        const QString addition = incoming.trimmed();
-        if (addition.isEmpty()) {
-            return;
-        }
+    void append_partial_text(const QString& incoming, qint64 latency_ms, double queue_seconds) {
+        latency_label_->setText(QString("Partial latency: %1 ms, %2 s behind live")
+            .arg(latency_ms).arg(QString::number(queue_seconds, 'f', 1)));
 
-        QString current = transcript_->toPlainText().trimmed();
-        if (current.isEmpty()) {
-            transcript_->setPlainText(addition);
-            return;
-        }
+        partial_text::append_with_overlap(partial_words_, incoming,
+            maximum_overlap_words, maximum_partial_words, partial_trimmed_);
+        render_partial_text();
+    }
 
-        int best_length = 0;
-        int best_position = 0;
-        const int maximum_overlap = qMin(80, current.size());
-        for (int length = maximum_overlap; length >= 4; --length) {
-            const QString suffix = current.right(length);
-            const int position = addition.indexOf(suffix, 0, Qt::CaseInsensitive);
-            if (position >= 0 && position <= 40) {
-                best_length = length;
-                best_position = position;
-                break;
-            }
-        }
-
-        QString new_text = current;
-        if (best_length > 0) {
-            const QString remainder = addition.mid(best_position + best_length).trimmed();
-            if (!remainder.isEmpty()) {
-                new_text += current.endsWith(' ') ? remainder : " " + remainder;
-            }
-        } else {
-            new_text += current.endsWith(' ') ? addition : " " + addition;
-        }
-        transcript_->setPlainText(new_text);
+    void render_partial_text() {
+        const QString body = partial_words_.join(' ');
+        transcript_->setPlainText(partial_trimmed_ ? "[earlier text trimmed] " + body : body);
         transcript_->moveCursor(QTextCursor::End);
+    }
+
+    void handle_stream_stats(const QString& line) {
+        int dropped = 0;
+        int rate_limited = 0;
+        for (const QString& field : line.split('|')) {
+            if (field.startsWith("dropped=")) {
+                dropped = field.section('=', 1).toInt();
+            } else if (field.startsWith("rate_limited=")) {
+                rate_limited = field.section('=', 1).toInt();
+            }
+        }
+        if (dropped > 0 || rate_limited > 0) {
+            latency_label_->setText(QString("Live text skipped %1 window(s); the final "
+                                            "transcription covers everything")
+                .arg(dropped + rate_limited));
+        }
     }
 
     void save_transcript() {
@@ -436,14 +435,18 @@ private:
     QLabel* duration_label_;
     QLabel* model_label_;
     QLabel* input_label_;
+    QLabel* latency_label_;
     QPlainTextEdit* transcript_;
     QProcess* process_;
     QTimer* timer_;
     QTimer* limit_timer_;
     QTime started_at_;
     QString output_buffer_;
-    QString pending_text_label_;
     QString final_transcription_;
+    QStringList partial_words_;
+    bool partial_trimmed_ = false;
+    static constexpr int maximum_partial_words = 3000;
+    static constexpr int maximum_overlap_words = 40;
     QString transcript_path_;
     bool completed_ = false;
     bool closing_ = false;
