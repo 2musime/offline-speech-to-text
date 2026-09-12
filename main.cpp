@@ -671,6 +671,25 @@ void report_model(const ModelMetadata& metadata) {
               << metadata.mel_bands << " mel bands" << std::endl;
 }
 
+// Structured lines are newline-delimited, so text fields must not carry one.
+std::string as_single_line(const std::string& text) {
+    std::string flattened;
+    flattened.reserve(text.size());
+    bool pending_space = false;
+    for (const char character : text) {
+        if (character == '\n' || character == '\r' || character == '\t') {
+            pending_space = !flattened.empty();
+            continue;
+        }
+        if (pending_space) {
+            flattened.push_back(' ');
+            pending_space = false;
+        }
+        flattened.push_back(character);
+    }
+    return flattened;
+}
+
 void report_saved(const char* kind, const fs::path& path) {
     std::cout << "SAVED|" << kind << '|' << path.string() << std::endl;
 }
@@ -1197,7 +1216,7 @@ bool transcribe(
         return false;
     }
 
-    std::cout << "\nTranscription:\n" << result.text << std::endl;
+    std::cout << "FINAL|" << as_single_line(result.text) << std::endl;
     report_saved("TRANSCRIPT", output_path);
     std::cout << "Whisper processing time: " << result.milliseconds << " ms" << std::endl;
     return true;
@@ -1212,15 +1231,32 @@ void streaming_worker(
     std::uint32_t sample_rate) {
     constexpr std::size_t window_seconds = 5;
     constexpr std::size_t stride_seconds = 4;
+    // A partial every few hundred milliseconds is as fast as anyone can read.
+    // In steady state windows arrive one per stride, far slower than this; the
+    // limit only bites while catching up on a backlog.
+    constexpr long long minimum_partial_interval_ms = 750;
+    // Cap the backlog so a model slower than real time cannot grow `pending`
+    // without bound, and so queue latency stays roughly predictable.
+    constexpr std::size_t maximum_backlog_strides = 3;
+
     const std::size_t window_size = sample_rate * window_seconds;
     const std::size_t stride_size = sample_rate * stride_seconds;
+    const std::size_t maximum_pending = window_size + stride_size * maximum_backlog_strides;
+
     std::vector<std::int16_t> pending;
     std::vector<std::int16_t> scratch;
     TranscriptionWorkspace workspace;
     const std::vector<SpeechSegment> window_range{{0, window_size}};
-    pending.reserve(window_size + stride_size);
+    pending.reserve(maximum_pending + stride_size);
     workspace.audio.reserve(window_size);
+
     const long long cpu_start = process_cpu_milliseconds();
+    std::size_t dropped_windows = 0;
+    std::size_t rate_limited_windows = 0;
+    std::size_t emitted_windows = 0;
+    long long worst_latency_ms = 0;
+    auto last_partial = std::chrono::steady_clock::now() -
+        std::chrono::milliseconds(minimum_partial_interval_ms);
 
     while (!shutdown_is_requested() &&
            (!capture.finished.load(std::memory_order_acquire) || capture.buffer.available() > 0)) {
@@ -1233,20 +1269,48 @@ void streaming_worker(
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
+        // Falling behind costs partials, never captured audio: everything
+        // drained is already in all_samples for the final pass.
+        while (pending.size() > maximum_pending) {
+            const std::size_t discard = std::min(stride_size, pending.size() - window_size);
+            pending.erase(pending.begin(), pending.begin() + discard);
+            ++dropped_windows;
+        }
+
         while (pending.size() >= window_size) {
-            const auto start = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            const long long since_partial = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_partial).count();
+            if (since_partial < minimum_partial_interval_ms) {
+                // Skip the inference too, not just the printing: the audio is
+                // already safe in all_samples.
+                pending.erase(pending.begin(), pending.begin() + stride_size);
+                ++rate_limited_windows;
+                continue;
+            }
+
             TranscriptionResult result;
             // Transcribe the leading window in place rather than copying it out.
             if (!run_transcription(context, pending, window_range, thread_count, workspace, result)) {
                 report_error(ErrorCategory::Transcription, "Streaming transcription failed for an audio window.");
                 return;
             }
-            const auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-            std::cout << "\nPartial (window ending at " << window_seconds
-                      << "s, latency " << latency << " ms):\n"
-                      << result.text << std::endl;
+
+            const auto finished = std::chrono::steady_clock::now();
+            const long long latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+                finished - now).count();
+            worst_latency_ms = std::max(worst_latency_ms, latency);
+            last_partial = finished;
+            ++emitted_windows;
+
             pending.erase(pending.begin(), pending.begin() + stride_size);
+
+            // Audio waiting to be transcribed, in seconds: how far behind live
+            // the partial text currently is.
+            const double queue_seconds =
+                static_cast<double>(pending.size() + capture.buffer.available()) / sample_rate;
+            std::cout << "PARTIAL|" << latency << '|' << queue_seconds << '|'
+                      << as_single_line(result.text) << std::endl;
         }
     }
 
@@ -1256,8 +1320,17 @@ void streaming_worker(
             "Streaming buffer overflowed; " + std::to_string(dropped) + " frames (" +
             std::to_string(capture.dropped_seconds(sample_rate)) + " s) were dropped.");
     }
-    std::cout << "Streaming worker CPU time: "
-              << process_cpu_milliseconds() - cpu_start << " ms" << std::endl;
+    if (dropped_windows > 0) {
+        report_warning(ErrorCategory::Transcription,
+            std::to_string(dropped_windows) + " streaming window(s) were discarded to keep up. "
+            "Partial text skipped ahead; the final transcription still covers the whole recording.");
+    }
+
+    std::cout << "STREAMSTATS|emitted=" << emitted_windows
+              << "|rate_limited=" << rate_limited_windows
+              << "|dropped=" << dropped_windows
+              << "|worst_latency_ms=" << worst_latency_ms
+              << "|cpu_ms=" << process_cpu_milliseconds() - cpu_start << std::endl;
 }
 
 // Prints the capture devices in a form both a person and the GUI can read.
