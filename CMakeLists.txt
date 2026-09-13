@@ -222,10 +222,13 @@ else()
         RUNTIME DESTINATION lib64/audio-to-text)
 endif()
 
-# A desktop entry and a shell script mean nothing on Windows. Their equivalents
-# -- a Start Menu shortcut and a PowerShell model downloader -- belong with the
-# installer work, not here.
-if(NOT WIN32)
+# A desktop entry means nothing on Windows, where the Start Menu shortcut comes
+# from the installer instead. The model downloader exists for both, in the
+# language each platform can run without installing anything first.
+if(WIN32)
+    install(FILES scripts/install-model.ps1
+        DESTINATION ${CMAKE_INSTALL_BINDIR})
+else()
     install(FILES packaging/audio-to-text.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 
@@ -278,9 +281,35 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_HOMEPAGE_URL "${PROJECT_HOMEPAGE_URL}")
 set(CPACK_PACKAGE_CONTACT "david@sokrab.com")
 if(WIN32)
-    # A ZIP is what this branch can honestly produce: unpack and run. The signed
-    # installer is separate work; see docs/BUILDING.md.
+    # The ZIP is unpack-and-run and always produced. NSIS is added only when
+    # makensis is actually present, so a machine without it still gets an
+    # archive rather than a failed cpack run.
     set(CPACK_GENERATOR "ZIP")
+    find_program(AUDIO_TO_TEXT_MAKENSIS makensis)
+    if(AUDIO_TO_TEXT_MAKENSIS)
+        list(APPEND CPACK_GENERATOR "NSIS")
+    else()
+        message(STATUS
+            "makensis was not found: cpack will produce the ZIP but no installer.")
+    endif()
+
+    # Named without the version, so an upgrade replaces the previous install
+    # instead of leaving two copies side by side.
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "Audio to Text")
+    # Start Menu shortcut: the executable without its extension, then the label.
+    # CPack looks for it under bin/, which is where it is installed.
+    set(CPACK_PACKAGE_EXECUTABLES "audio_to_text" "Audio to Text")
+    set(CPACK_NSIS_PACKAGE_NAME "Audio to Text")
+    set(CPACK_NSIS_DISPLAY_NAME "Audio to Text ${PROJECT_VERSION}")
+    set(CPACK_NSIS_URL_INFO_ABOUT "${PROJECT_HOMEPAGE_URL}")
+    set(CPACK_NSIS_HELP_LINK "${PROJECT_HOMEPAGE_URL}")
+    set(CPACK_NSIS_CONTACT "${CPACK_PACKAGE_CONTACT}")
+    # Nothing here belongs on PATH, and an upgrade should not stack on top of
+    # the files windeployqt left behind last time.
+    set(CPACK_NSIS_MODIFY_PATH OFF)
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    # Recordings and transcripts live in %LOCALAPPDATA% and are the user's, not
+    # the installer's. Uninstalling removes the program and leaves them alone.
 else()
     set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
     set(CPACK_GENERATOR "RPM;TGZ")
