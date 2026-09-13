@@ -71,8 +71,11 @@ public:
         model_selector_ = new QComboBox(central);
         // base.en first, so it is the default: it transcribes roughly 3.5x
         // faster than small.en, which matters most on long recordings.
-        model_selector_->addItem("Speed: base.en", "models/ggml-base.en.bin");
-        model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
+        // A name, not a path. The worker searches its approved directories for
+        // it, which is the only thing that works when the application is
+        // started from a menu entry and inherits no useful working directory.
+        model_selector_->addItem("Speed: base.en", "ggml-base.en.bin");
+        model_selector_->addItem("Accuracy: small.en", "ggml-small.en.bin");
         model_selector_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
 
         device_selector_ = new QComboBox(central);

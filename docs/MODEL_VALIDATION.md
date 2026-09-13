@@ -78,6 +78,19 @@ Download with the vendored script, which fetches from that repository:
 bash third_party/whisper.cpp/models/download-ggml-model.sh small.en models
 ```
 
+## Naming a model
+
+Either by path, or by bare file name:
+
+```bash
+audio_to_text_cli ggml-base.en.bin              # searched for in the roots
+audio_to_text_cli models/ggml-base.en.bin       # resolved as a path
+audio_to_text_cli /opt/m.bin --model-dir /opt   # approved explicitly
+```
+
+The interface uses the first form. See
+[FILE_STORAGE.md](FILE_STORAGE.md) for the directories searched.
+
 ## Checksums
 
 **Upstream publishes no checksum list.** Do not treat any hash in this document
