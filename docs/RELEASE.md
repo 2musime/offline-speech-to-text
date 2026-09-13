@@ -8,7 +8,7 @@ can always identify itself:
 
 ```bash
 audio_to_text_cli --version
-# audio_to_text 1.1.0 (76c5605, Release)
+# audio_to_text 1.2.0 (404259b, Release)
 ```
 
 The GUI shows the same under **About**, and in its title bar.
@@ -103,8 +103,8 @@ artifacts are different versions is worse than one that ships Linux only.
 **10. Tag and publish**
 
 ```bash
-git tag -a v1.1.0 -m "1.1.0"
-git push origin v1.1.0
+git tag -a v.1.2.0 -m "1.2.0"
+git push origin v.1.2.0
 ```
 
 Attach every artifact to one GitHub release, so a single version number covers
