@@ -1,0 +1,20 @@
+# Line endings are LF in the repository and LF in the working tree, on every
+# platform. Git for Windows offers to convert to CRLF on checkout; if it did,
+# the formatting gate would fail on files nobody had touched, and every commit
+# from a Windows machine would rewrite whole files.
+* text=auto eol=lf
+
+# Windows shells will not reliably run a script that arrives with LF endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Vendored content is upstream's to format.
+third_party/** -text
+
+# Never normalise, never diff as text.
+*.wav binary
+*.mp3 binary
+*.bin binary
+*.png binary
+*.ico binary
