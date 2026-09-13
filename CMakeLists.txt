@@ -57,6 +57,22 @@ add_subdirectory(third_party/whisper.cpp EXCLUDE_FROM_ALL)
 find_package(Threads REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
+# libm is a separate library only on Unix; the Microsoft CRT already has it, and
+# CMAKE_DL_LIBS is empty on Windows. Naming "m" unconditionally fails the link.
+set(AUDIO_TO_TEXT_PLATFORM_LIBS ${CMAKE_DL_LIBS})
+if(NOT WIN32)
+    list(APPEND AUDIO_TO_TEXT_PLATFORM_LIBS m)
+endif()
+
+# Windows resolves a DLL from the directory holding the executable, and there is
+# no RPATH to point anywhere else. ggml already sends its shared libraries to
+# <build>/bin, so the executables have to go there too or the build tree is not
+# runnable. Left alone elsewhere: Linux has the RPATH set further down, and
+# moving the binaries would break every script and document that names them.
+if(WIN32)
+    set(AUDIO_TO_TEXT_RUNTIME_DIR "${CMAKE_BINARY_DIR}/bin")
+endif()
+
 add_executable(audio_to_text_cli
     main.cpp
 )
@@ -69,8 +85,7 @@ target_include_directories(audio_to_text_cli PRIVATE
 target_link_libraries(audio_to_text_cli PRIVATE
     whisper
     Threads::Threads
-    ${CMAKE_DL_LIBS}
-    m
+    ${AUDIO_TO_TEXT_PLATFORM_LIBS}
 )
 
 add_executable(audio_to_text
@@ -87,17 +102,27 @@ target_include_directories(audio_to_text PRIVATE
 target_link_libraries(audio_to_text PRIVATE
     Qt6::Widgets
     Threads::Threads
-    ${CMAKE_DL_LIBS}
-    m
+    ${AUDIO_TO_TEXT_PLATFORM_LIBS}
 )
 
-# So an installed binary finds the private Whisper and ggml libraries.
-set_target_properties(audio_to_text audio_to_text_cli PROPERTIES
-    INSTALL_RPATH "${AUDIO_TO_TEXT_PRIVATE_LIBDIR}"
-    BUILD_WITH_INSTALL_RPATH FALSE
-    # Without this the installed binary keeps absolute build-tree paths, which
-    # would resolve on this machine and nowhere else.
-    INSTALL_RPATH_USE_LINK_PATH FALSE)
+if(WIN32)
+    # WIN32_EXECUTABLE picks the GUI subsystem, without which Windows opens a
+    # console window behind the interface. Qt supplies the entry point for it.
+    # The worker stays a console program: Qt starts it with CREATE_NO_WINDOW
+    # for every channel mode except ForwardedChannels, and this GUI merges its
+    # channels, so no window should appear. Confirm that on a real machine.
+    set_target_properties(audio_to_text PROPERTIES WIN32_EXECUTABLE TRUE)
+    set_target_properties(audio_to_text audio_to_text_cli PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${AUDIO_TO_TEXT_RUNTIME_DIR}")
+else()
+    # So an installed binary finds the private Whisper and ggml libraries.
+    set_target_properties(audio_to_text audio_to_text_cli PROPERTIES
+        INSTALL_RPATH "${AUDIO_TO_TEXT_PRIVATE_LIBDIR}"
+        BUILD_WITH_INSTALL_RPATH FALSE
+        # Without this the installed binary keeps absolute build-tree paths,
+        # which would resolve on this machine and nowhere else.
+        INSTALL_RPATH_USE_LINK_PATH FALSE)
+endif()
 
 # MSVC needs its own spelling of all of this. Without the branch below a
 # Windows build compiled with no warnings enabled at all, which is the one
@@ -147,9 +172,20 @@ add_executable(audio_to_text_gui_tests tests/gui_tests.cpp)
 target_include_directories(audio_to_text_gui_tests PRIVATE . tests)
 target_link_libraries(audio_to_text_gui_tests PRIVATE Qt6::Core)
 
+if(WIN32)
+    # The unit tests link Whisper, so they need the same directory as the DLLs.
+    set_target_properties(audio_to_text_unit_tests audio_to_text_gui_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${AUDIO_TO_TEXT_RUNTIME_DIR}")
+endif()
+
 add_test(NAME unit COMMAND audio_to_text_unit_tests)
 add_test(NAME gui COMMAND audio_to_text_gui_tests)
-add_test(NAME cli COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_tests.sh $<TARGET_FILE:audio_to_text_cli>)
+# The command-line suite is a shell script. Registering it on Windows would fail
+# at run time rather than reporting honestly, so it is left out until it is
+# ported; see docs/TESTING.md.
+if(NOT WIN32)
+    add_test(NAME cli COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_tests.sh $<TARGET_FILE:audio_to_text_cli>)
+endif()
 
 if(AUDIO_TO_TEXT_WARNING_FLAGS)
     target_compile_options(audio_to_text_unit_tests PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
@@ -175,17 +211,59 @@ install(TARGETS audio_to_text audio_to_text_cli
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Whisper and ggml are built from the pinned submodule, so they are installed
-# privately rather than into the system library path.
-install(TARGETS whisper ggml ggml-base ggml-cpu
-    LIBRARY DESTINATION lib64/audio-to-text
-    RUNTIME DESTINATION lib64/audio-to-text)
+# privately rather than into the system library path. On Windows a DLL is only
+# found beside the executable, so "privately" there means the same directory.
+if(WIN32)
+    install(TARGETS whisper ggml ggml-base ggml-cpu
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+else()
+    install(TARGETS whisper ggml ggml-base ggml-cpu
+        LIBRARY DESTINATION lib64/audio-to-text
+        RUNTIME DESTINATION lib64/audio-to-text)
+endif()
 
-install(FILES packaging/audio-to-text.desktop
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+# A desktop entry and a shell script mean nothing on Windows. Their equivalents
+# -- a Start Menu shortcut and a PowerShell model downloader -- belong with the
+# installer work, not here.
+if(NOT WIN32)
+    install(FILES packaging/audio-to-text.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 
-install(PROGRAMS scripts/install-model.sh
-    DESTINATION ${CMAKE_INSTALL_BINDIR}
-    RENAME audio-to-text-install-model)
+    install(PROGRAMS scripts/install-model.sh
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        RENAME audio-to-text-install-model)
+endif()
+
+# Qt's own libraries and its platform plugin are not covered by install(TARGETS)
+# and have no system package to come from on Windows. windeployqt reads the
+# installed executable and copies everything it needs next to it.
+if(WIN32)
+    # Qt does not export windeployqt as a target in every version, so it is
+    # located next to qmake, which is exported.
+    if(TARGET Qt6::qmake)
+        get_target_property(AUDIO_TO_TEXT_QMAKE Qt6::qmake IMPORTED_LOCATION)
+        get_filename_component(AUDIO_TO_TEXT_QT_BIN "${AUDIO_TO_TEXT_QMAKE}" DIRECTORY)
+    endif()
+    find_program(AUDIO_TO_TEXT_WINDEPLOYQT windeployqt HINTS "${AUDIO_TO_TEXT_QT_BIN}")
+
+    if(AUDIO_TO_TEXT_WINDEPLOYQT)
+        # COMMAND_ERROR_IS_FATAL would be shorter but arrived in CMake 3.19,
+        # and this project supports 3.16.
+        install(CODE "
+            execute_process(
+                COMMAND \"${AUDIO_TO_TEXT_WINDEPLOYQT}\"
+                    --no-translations --no-system-d3d-compiler --no-opengl-sw
+                    \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/audio_to_text.exe\"
+                RESULT_VARIABLE deploy_result)
+            if(NOT deploy_result EQUAL 0)
+                message(FATAL_ERROR \"windeployqt failed: \${deploy_result}\")
+            endif()")
+    else()
+        message(WARNING
+            "windeployqt was not found. The installed application will not start "
+            "until Qt's libraries are placed beside audio_to_text.exe.")
+    endif()
+endif()
 
 install(FILES
         docs/PRIVACY.md docs/BUILDING.md docs/MODEL_VALIDATION.md
@@ -199,16 +277,22 @@ set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_HOMEPAGE_URL "${PROJECT_HOMEPAGE_URL}")
 set(CPACK_PACKAGE_CONTACT "david@sokrab.com")
-set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
-set(CPACK_GENERATOR "RPM;TGZ")
+if(WIN32)
+    # A ZIP is what this branch can honestly produce: unpack and run. The signed
+    # installer is separate work; see docs/BUILDING.md.
+    set(CPACK_GENERATOR "ZIP")
+else()
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+    set(CPACK_GENERATOR "RPM;TGZ")
 
-set(CPACK_RPM_PACKAGE_LICENSE "MIT")
-set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
-# Qt comes from the distribution; the model is downloaded separately and is
-# deliberately not packaged, being hundreds of megabytes.
-set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtbase-gui")
-set(CPACK_RPM_PACKAGE_AUTOREQPROV "no")
-set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
-    "/usr/lib64" "/usr/share/applications" "/usr/share/doc")
+    set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+    set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
+    # Qt comes from the distribution; the model is downloaded separately and is
+    # deliberately not packaged, being hundreds of megabytes.
+    set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtbase-gui")
+    set(CPACK_RPM_PACKAGE_AUTOREQPROV "no")
+    set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+        "/usr/lib64" "/usr/share/applications" "/usr/share/doc")
+endif()
 
 include(CPack)
