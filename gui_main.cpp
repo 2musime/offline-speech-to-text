@@ -985,21 +985,20 @@ private:
         if (recordings_.empty()) {
             auto* empty = new QListWidgetItem(
                 "No recordings yet\n\nGo to Recording to make one", speech_list_);
+            empty->setTextAlignment(Qt::AlignCenter);
             empty->setFlags(Qt::NoItemFlags);
             return;
         }
 
         for (const RecordingEntry& entry : recordings_) {
-            char when[64];
+            // The name the file carries, and nothing else. Length and transcript
+            // status belong to the recording being played, not to the list.
+            char stamp[32];
             std::tm shown = entry.stamp.when;
-            std::strftime(when, sizeof(when), "%d %b %Y, %H:%M", &shown);
-            const QString length = QTime(0, 0)
-                .addSecs(static_cast<int>(entry.seconds))
-                .toString(entry.seconds >= 3600 ? "hh:mm:ss" : "mm:ss");
+            std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
             auto* item = new QListWidgetItem(
-                QString("%1\n%2%3").arg(QString::fromUtf8(when), length,
-                    entry.has_transcript ? QString("   \u00b7   transcribed") : QString()),
-                speech_list_);
+                QString("recording-%1").arg(QString::fromUtf8(stamp)), speech_list_);
+            item->setTextAlignment(Qt::AlignCenter);
             item->setToolTip(QString::fromStdString(entry.path.string()));
         }
         if (previous >= 0 && previous < speech_list_->count()) {
@@ -1040,7 +1039,9 @@ private:
         char when[64];
         std::tm shown = entry.stamp.when;
         std::strftime(when, sizeof(when), "%d %b %Y at %H:%M", &shown);
-        now_playing_->setText(QString::fromUtf8(when));
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
+        now_playing_->setText(QString("recording-%1").arg(QString::fromUtf8(stamp)));
         recording_details_->setText(QString(
             "%1 long, %2 MB.  %3\n"
             "This is the original recording. Whisper is given the speech "

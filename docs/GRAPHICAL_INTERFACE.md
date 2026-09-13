@@ -132,8 +132,16 @@ than followed. See [FILE_STORAGE.md](FILE_STORAGE.md).
 
 ## Speeches
 
-`Speeches`, or `Ctrl+P`, lists every recording newest first with its length and
-whether it was transcribed. Selecting one loads it; **Play**, **Stop** and the
+`Speeches`, or `Ctrl+P`, lists every recording newest first, each named for when
+it was made:
+
+```text
+recording-20260913145545
+```
+
+That name and nothing else. Length, size and whether it was transcribed belong
+to the recording you have selected, not to every row, and are shown beneath the
+player once one is chosen. Selecting a row loads it; **Play**, **Stop** and the
 position slider work as they do anywhere else.
 
 **What plays is the raw capture.** Each recording produces three files: the raw
