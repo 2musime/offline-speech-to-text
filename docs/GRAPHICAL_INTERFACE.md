@@ -19,8 +19,9 @@ The bar is navigation and nothing else. Pressing **Recording** goes to the
 recording screen; it does not start a recording. Starting is done there, with
 the model, microphone and limit already in view.
 
-Home is deliberately almost empty. It says what the application is and offers
-the one thing someone opening it wants.
+Home is deliberately almost empty. It says what the application is, offers the
+one thing someone opening it wants, and gives a count of what is already stored
+so there is a reason to look at the other screens.
 
 Navigation closes while a recording or transcription is running. The controls
 for something still running must not be hidden behind another screen.

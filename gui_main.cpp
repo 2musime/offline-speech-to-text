@@ -286,6 +286,12 @@ public:
         go_row->addWidget(go_record_button_);
         go_row->addStretch();
         home_layout->addLayout(go_row);
+        home_layout->addSpacing(24);
+
+        home_summary_ = new QLabel(home_page);
+        home_summary_->setAlignment(Qt::AlignCenter);
+        home_summary_->setEnabled(false);
+        home_layout->addWidget(home_summary_);
         home_layout->addStretch();
 
         // ---- Speeches: play back what was actually said. This is the raw
@@ -318,35 +324,55 @@ public:
         auto* player_panel = new QWidget(speech_page);
         auto* player_layout = new QVBoxLayout(player_panel);
         player_layout->setContentsMargins(0, 0, 0, 0);
+        player_layout->setSpacing(12);
 
+        // Header matches the transcripts screen, so the two read the same way.
         now_playing_ = new QLabel("Select a recording to play it", player_panel);
+        QFont playing_font = now_playing_->font();
+        playing_font.setBold(true);
+        now_playing_->setFont(playing_font);
         player_layout->addWidget(now_playing_);
-        player_layout->addStretch();
 
-        play_button_ = new QPushButton("Play", player_panel);
+        auto* transport_panel = new QGroupBox(player_panel);
+        auto* transport_layout = new QVBoxLayout(transport_panel);
+        transport_layout->setSpacing(10);
+
+        play_button_ = new QPushButton("Play", transport_panel);
         play_button_->setMinimumHeight(40);
-        play_button_->setMinimumWidth(120);
+        play_button_->setMinimumWidth(130);
         QFont play_font = play_button_->font();
         play_font.setBold(true);
         play_button_->setFont(play_font);
-        stop_play_button_ = new QPushButton("Stop", player_panel);
-        stop_play_button_->setMinimumHeight(40);
         play_button_->setEnabled(false);
+        stop_play_button_ = new QPushButton("Stop", transport_panel);
+        stop_play_button_->setMinimumHeight(40);
         stop_play_button_->setEnabled(false);
 
-        position_slider_ = new QSlider(Qt::Horizontal, player_panel);
-        position_slider_->setRange(0, 0);
-        position_slider_->setEnabled(false);
-        play_time_ = new QLabel("00:00 / 00:00", player_panel);
+        play_time_ = new QLabel("00:00 / 00:00", transport_panel);
+        QFont time_font = play_time_->font();
+        time_font.setPointSize(time_font.pointSize() + 3);
+        play_time_->setFont(time_font);
 
         auto* transport = new QHBoxLayout();
         transport->addWidget(play_button_);
         transport->addWidget(stop_play_button_);
-        transport->addSpacing(16);
+        transport->addSpacing(20);
         transport->addWidget(play_time_);
         transport->addStretch();
-        player_layout->addLayout(transport);
-        player_layout->addWidget(position_slider_);
+        transport_layout->addLayout(transport);
+
+        position_slider_ = new QSlider(Qt::Horizontal, transport_panel);
+        position_slider_->setRange(0, 0);
+        position_slider_->setEnabled(false);
+        transport_layout->addWidget(position_slider_);
+        player_layout->addWidget(transport_panel);
+
+        // The space under the controls was empty; this is what belongs in it.
+        recording_details_ = new QLabel(player_panel);
+        recording_details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        recording_details_->setWordWrap(true);
+        recording_details_->setEnabled(false);
+        player_layout->addWidget(recording_details_);
         player_layout->addStretch();
 
         delete_speech_ = new QPushButton("Delete Recording", player_panel);
@@ -915,7 +941,23 @@ private:
         stack_->setCurrentIndex(0);
         home_action_->setChecked(true);
         context_label_->setText("Ready when you are");
+        refresh_home_summary();
         apply_state(state_);
+    }
+
+    // Home is otherwise silent about what the application already holds, which
+    // gives no reason to visit the other screens.
+    void refresh_home_summary() {
+        const fs::path root(data_directory_.toStdString());
+        const std::size_t recordings = list_recordings(root).size();
+        const std::size_t transcripts = list_transcripts(root).size();
+        if (recordings == 0 && transcripts == 0) {
+            home_summary_->setText(QString());
+            return;
+        }
+        home_summary_->setText(QString("%1 recording%2  ·  %3 transcript%4")
+            .arg(recordings).arg(recordings == 1 ? "" : "s")
+            .arg(transcripts).arg(transcripts == 1 ? "" : "s"));
     }
 
     void show_speeches() {
@@ -941,7 +983,8 @@ private:
         recordings_ = list_recordings(fs::path(data_directory_.toStdString()));
 
         if (recordings_.empty()) {
-            auto* empty = new QListWidgetItem("No recordings yet", speech_list_);
+            auto* empty = new QListWidgetItem(
+                "No recordings yet\n\nGo to Recording to make one", speech_list_);
             empty->setFlags(Qt::NoItemFlags);
             return;
         }
@@ -954,8 +997,8 @@ private:
                 .addSecs(static_cast<int>(entry.seconds))
                 .toString(entry.seconds >= 3600 ? "hh:mm:ss" : "mm:ss");
             auto* item = new QListWidgetItem(
-                QString("%1\n%2   %3").arg(QString::fromUtf8(when), length,
-                    entry.has_transcript ? QString("transcribed") : QString("no transcript")),
+                QString("%1\n%2%3").arg(QString::fromUtf8(when), length,
+                    entry.has_transcript ? QString("   \u00b7   transcribed") : QString()),
                 speech_list_);
             item->setToolTip(QString::fromStdString(entry.path.string()));
         }
@@ -968,7 +1011,12 @@ private:
         player_.unload();
         play_timer_->stop();
         if (row < 0 || row >= static_cast<int>(recordings_.size())) {
-            now_playing_->setText("Select a recording to play it");
+            now_playing_->setText(recordings_.empty()
+                ? QString("Nothing recorded yet")
+                : QString("Select a recording to play it"));
+            recording_details_->setText(recordings_.empty()
+                ? QString("Recordings you make appear here, and can be played back.")
+                : QString());
             play_button_->setEnabled(false);
             stop_play_button_->setEnabled(false);
             delete_speech_->setEnabled(false);
@@ -981,8 +1029,8 @@ private:
         const RecordingEntry& entry = recordings_[static_cast<std::size_t>(row)];
         std::string reason;
         if (!player_.load(entry.path, reason)) {
-            now_playing_->setText("Could not open this recording: " +
-                                  QString::fromStdString(reason));
+            now_playing_->setText("Could not open this recording");
+            recording_details_->setText(QString::fromStdString(reason));
             play_button_->setEnabled(false);
             stop_play_button_->setEnabled(false);
             delete_speech_->setEnabled(true);
@@ -992,7 +1040,14 @@ private:
         char when[64];
         std::tm shown = entry.stamp.when;
         std::strftime(when, sizeof(when), "%d %b %Y at %H:%M", &shown);
-        now_playing_->setText(QString("%1").arg(QString::fromUtf8(when)));
+        now_playing_->setText(QString::fromUtf8(when));
+        recording_details_->setText(QString(
+            "%1 long, %2 MB.  %3\n"
+            "This is the original recording. Whisper is given the speech "
+            "extracted from it, not this.")
+            .arg(QTime(0, 0).addSecs(static_cast<int>(entry.seconds)).toString("mm:ss"),
+                 QString::number(entry.size_bytes / (1024.0 * 1024.0), 'f', 1),
+                 entry.has_transcript ? "Transcribed." : "Not transcribed."));
         play_button_->setEnabled(true);
         play_button_->setText("Play");
         stop_play_button_->setEnabled(true);
@@ -1142,7 +1197,8 @@ private:
         entries_ = list_transcripts(fs::path(data_directory_.toStdString()));
 
         if (entries_.empty()) {
-            auto* empty = new QListWidgetItem("No saved transcripts yet", history_list_);
+            auto* empty = new QListWidgetItem(
+                "No saved transcripts yet\n\nGo to Recording to make one", history_list_);
             empty->setFlags(Qt::NoItemFlags);
             return;
         }
@@ -1665,6 +1721,7 @@ private:
     QListWidget* history_list_;
     QStackedWidget* stack_;
     QPushButton* go_record_button_;
+    QLabel* home_summary_;
     QPushButton* delete_all_button_;
     QPlainTextEdit* saved_view_;
     QLabel* saved_title_;
@@ -1677,6 +1734,7 @@ private:
     QPushButton* play_button_;
     QPushButton* stop_play_button_;
     QPushButton* delete_speech_;
+    QLabel* recording_details_;
     QSlider* position_slider_;
     std::vector<RecordingEntry> recordings_;
     AudioPlayer player_;
