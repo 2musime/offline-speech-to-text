@@ -47,8 +47,10 @@ download them yourself with the vendored script. See
 
 ## What is written, and where
 
-Only inside the application data directory, and only readable by you
-(directories `0700`, files `0600`). See [FILE_STORAGE.md](FILE_STORAGE.md).
+Only inside the application data directory, and only readable by you — on
+Linux through explicit permissions (directories `0700`, files `0600`), on
+Windows through the per-user ACL that `%LOCALAPPDATA%` already carries. See
+[FILE_STORAGE.md](FILE_STORAGE.md).
 
 ```text
 <data>/recordings/     WAV audio

@@ -6,11 +6,19 @@ through an atomic write.
 
 ## Data directory
 
-Resolved in this order:
+On Linux, resolved in this order:
 
 1. `$XDG_DATA_HOME/audio-to-text`
 2. `$HOME/.local/share/audio-to-text`
 3. `./.audio-to-text` if neither variable is set
+
+On Windows:
+
+1. `%LOCALAPPDATA%\audio-to-text`
+2. `.\.audio-to-text` if the variable is not set
+
+`LOCALAPPDATA` rather than `APPDATA`, because recordings are large and
+machine-local and should not follow the user onto another machine.
 
 Layout:
 
@@ -20,9 +28,11 @@ Layout:
 <data>/models/         optional approved model location
 ```
 
-Directories are created with mode `0700` and files with mode `0600`, so output
-is readable only by the user who produced it. The worker prints the resolved
-data directory at startup.
+On Linux, directories are created with mode `0700` and files with mode `0600`,
+so output is readable only by the user who produced it. Windows has no
+equivalent single call; `%LOCALAPPDATA%` already carries a per-user ACL that a
+directory created beneath it inherits, so the result is the same without an
+explicit step. The worker prints the resolved data directory at startup.
 
 ## Unique filenames
 
@@ -40,13 +50,32 @@ Recordings are no longer overwritten by the next one.
 
 ## Atomic writes
 
-`AtomicFile` writes to `<target>.tmp-<pid>`, calls `fsync`, then `rename`s into
-place and syncs the parent directory. A reader therefore sees either no file or
-a complete one, never a half-written one. If the write fails or the process
-exits early, the destructor removes the temporary file.
+`AtomicFile` writes to `<target>.tmp-<pid>`, flushes it, then renames it into
+place. A reader therefore sees either no file or a complete one, never a
+half-written one. If the write fails or the process exits early, the destructor
+removes the temporary file.
 
-The temporary is opened with `O_CREAT | O_EXCL | O_NOFOLLOW`, so an attacker who
-plants a symbolic link at that path cannot redirect the write.
+The temporary is always a sibling of its target, because the rename is only
+atomic within one volume.
+
+| Step | Linux | Windows |
+| --- | --- | --- |
+| Create | `open(O_CREAT\|O_EXCL\|O_NOFOLLOW)` | `_wopen(_O_CREAT\|_O_EXCL\|_O_BINARY)` |
+| Flush | `fsync` | `_commit` |
+| Rename | `rename` | `std::filesystem::rename` |
+| Durable rename | `fsync` on the parent directory | no equivalent |
+
+Two differences are worth naming:
+
+- POSIX `rename` replaces an existing target; the Windows call it maps to fails
+  unless replacement is requested, so the replace is explicit there. A unit
+  test commits twice over the same path to hold this in place.
+- Windows offers no way to flush a directory, so only the file contents are
+  made durable, not the rename itself.
+
+`O_EXCL` with `O_CREAT` refuses any existing name — a symbolic link on Linux, a
+reparse point on Windows — so an attacker who plants a link at the temporary's
+path cannot redirect the write.
 
 ## Path validation
 
@@ -55,6 +84,11 @@ Before any write, the destination must satisfy both:
 - it resolves inside the data directory, checked with `weakly_canonical`, so a
   symlinked subdirectory pointing elsewhere is refused
 - it is not itself a symbolic link
+
+Components are compared literally on Linux and case-insensitively on Windows,
+matching what each filesystem itself considers the same name. Folding on
+Windows cannot admit a path that is genuinely outside the root, because Windows
+does not allow two directories whose names differ only in case.
 
 Failures are reported as `ERROR|FILE_SAVING|...` and the recording stops.
 

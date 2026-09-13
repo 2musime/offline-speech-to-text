@@ -99,13 +99,36 @@ set_target_properties(audio_to_text audio_to_text_cli PROPERTIES
     # would resolve on this machine and nowhere else.
     INSTALL_RPATH_USE_LINK_PATH FALSE)
 
+# MSVC needs its own spelling of all of this. Without the branch below a
+# Windows build compiled with no warnings enabled at all, which is the one
+# configuration where the portability code most needs checking.
 if(AUDIO_TO_TEXT_ENABLE_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(AUDIO_TO_TEXT_WARNING_FLAGS -Wall -Wextra -Wpedantic)
     if(AUDIO_TO_TEXT_WARNINGS_AS_ERRORS)
         list(APPEND AUDIO_TO_TEXT_WARNING_FLAGS -Werror)
     endif()
+elseif(AUDIO_TO_TEXT_ENABLE_WARNINGS AND MSVC)
+    # /permissive- rejects the Microsoft extensions that let non-portable code
+    # compile quietly; /utf-8 keeps source and literals in UTF-8 whatever the
+    # machine's code page says.
+    set(AUDIO_TO_TEXT_WARNING_FLAGS /W4 /permissive- /utf-8)
+    if(AUDIO_TO_TEXT_WARNINGS_AS_ERRORS)
+        list(APPEND AUDIO_TO_TEXT_WARNING_FLAGS /WX)
+    endif()
+endif()
+
+if(AUDIO_TO_TEXT_WARNING_FLAGS)
     target_compile_options(audio_to_text_cli PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
     target_compile_options(audio_to_text PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
+endif()
+
+if(MSVC)
+    # _wgetenv and localtime carry a deprecation warning on this compiler. The
+    # replacements Microsoft suggests are not portable, and both calls are
+    # already used safely, so the warning is turned off rather than the code
+    # being contorted around it.
+    target_compile_definitions(audio_to_text_cli PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(audio_to_text PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 if(AUDIO_TO_TEXT_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -128,9 +151,14 @@ add_test(NAME unit COMMAND audio_to_text_unit_tests)
 add_test(NAME gui COMMAND audio_to_text_gui_tests)
 add_test(NAME cli COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_tests.sh $<TARGET_FILE:audio_to_text_cli>)
 
-if(AUDIO_TO_TEXT_ENABLE_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+if(AUDIO_TO_TEXT_WARNING_FLAGS)
     target_compile_options(audio_to_text_unit_tests PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
     target_compile_options(audio_to_text_gui_tests PRIVATE ${AUDIO_TO_TEXT_WARNING_FLAGS})
+endif()
+
+if(MSVC)
+    target_compile_definitions(audio_to_text_unit_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(audio_to_text_gui_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 if(AUDIO_TO_TEXT_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
