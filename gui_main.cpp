@@ -829,6 +829,11 @@ private:
     }
 
     void show_recorder() {
+        // Microphones are plugged in and unplugged while the application runs.
+        // Re-reading on arrival keeps the indices honest.
+        if (ui_state_may_start(state_)) {
+            refresh_devices();
+        }
         stack_->setCurrentIndex(1);
         recorder_action_->setChecked(true);
         update_context_bar();
@@ -1026,8 +1031,18 @@ private:
     }
 
     // Asks the worker to enumerate capture devices before any recording starts.
-    void populate_devices() {
+    void refresh_devices() {
+        const QVariant chosen = device_selector_->currentData();
+        device_selector_->clear();
         device_selector_->addItem("System default", -1);
+        populate_devices(chosen);
+    }
+
+    void populate_devices(const QVariant& restore = QVariant()) {
+        if (device_selector_->count() == 0) {
+            device_selector_->addItem("System default", -1);
+        }
+        restore_device_ = restore;
         device_selector_->setEnabled(false);
 
         // Enumeration runs asynchronously; blocking here froze the window for
@@ -1046,6 +1061,8 @@ private:
         probe->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", {"--list-devices"});
     }
 
+    // DEVICE|index|default|name|kind. The name may itself contain a separator,
+    // so it is taken as everything between the known first and last fields.
     void add_enumerated_devices(const QString& output) {
         const QStringList lines = output.split('\n');
         for (const QString& line : lines) {
@@ -1053,15 +1070,41 @@ private:
                 continue;
             }
             const QStringList parts = line.split('|');
-            if (parts.size() < 4) {
+            if (parts.size() < 5) {
                 continue;
             }
             const int index = parts.at(1).toInt();
-            const QString name = parts.mid(3).join('|').trimmed();
+            const QString kind = parts.last().trimmed();
+            const QString name = parts.mid(3, parts.size() - 4).join('|').trimmed();
             const bool is_default = parts.at(2) == "default";
-            device_selector_->addItem(is_default ? name + " (default)" : name, index);
+
+            QString label = name;
+            if (is_default) {
+                label += "  (default)";
+            }
+            if (kind == "monitor") {
+                // Saying so is the difference between a puzzling silent
+                // recording and an obviously wrong choice.
+                label += "  — speaker output, not a microphone";
+            }
+            device_selector_->addItem(label, index);
+            if (kind == "monitor") {
+                const int row = device_selector_->count() - 1;
+                device_selector_->setItemData(row, QColor(Qt::darkGray), Qt::ForegroundRole);
+                device_selector_->setItemData(
+                    row, "Records what is played through the speakers, not what you say.",
+                    Qt::ToolTipRole);
+            }
         }
         devices_ready_ = true;
+        // Keep the user's choice across a refresh when the device is still there.
+        if (restore_device_.isValid()) {
+            const int row = device_selector_->findData(restore_device_);
+            if (row >= 0) {
+                device_selector_->setCurrentIndex(row);
+            }
+            restore_device_ = QVariant();
+        }
         apply_state(state_);
     }
 
@@ -1362,6 +1405,7 @@ private:
     UiState state_ = UiState::Ready;
     int limit_seconds_ = 0;
     bool devices_ready_ = false;
+    QVariant restore_device_;
     QString output_buffer_;
     QString final_transcription_;
     QStringList partial_words_;

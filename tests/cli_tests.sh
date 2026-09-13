@@ -70,8 +70,23 @@ expect_error_category "a directory is refused" "MODEL" "$WORK" --model-dir "$WOR
 echo "== Device selection =="
 out="$("$BIN" --list-devices 2>&1)"
 echo "$out" | grep -q "^DEVICE|0|" && check "devices are enumerated" 0 || check "devices are enumerated" 1
-expect_error_category "an out-of-range device is refused" "MICROPHONE" \
-    "$MODEL" --device 9999
+# An index that has gone away no longer stops the recording: falling back to the
+# system default is more useful than refusing, and it is reported either way.
+out="$(printf 'q\n' | "$BIN" "$MODEL" --device 9999 2>&1)"
+echo "$out" | grep -q "^WARN|MICROPHONE|.*no longer available" \
+    && check "an out-of-range device falls back to the default" 0 \
+    || check "an out-of-range device falls back to the default" 1
+echo "$out" | grep -q "Using the system default" \
+    && check "the fallback is reported" 0 || check "the fallback is reported" 1
+
+# A monitor source is a loopback of the speakers, and must say so.
+out="$("$BIN" --list-devices 2>&1)"
+echo "$out" | grep -qE '\|(monitor|microphone)$' \
+    && check "devices are labelled as microphone or monitor" 0 \
+    || check "devices are labelled as microphone or monitor" 1
+echo "$out" | head -1 | grep -q "|microphone$" \
+    && check "a real microphone is listed before any monitor" 0 \
+    || check "a real microphone is listed before any monitor" 1
 
 echo "== Reporting protocol =="
 out="$("$BIN" --privacy 2>&1)"
