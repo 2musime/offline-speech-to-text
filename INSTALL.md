@@ -6,7 +6,7 @@ your own machine; nothing is uploaded. See [docs/PRIVACY.md](docs/PRIVACY.md).
 ## From a package (Fedora)
 
 ```bash
-sudo dnf install ./audio-to-text-1.0.0-Linux.rpm
+sudo dnf install ./audio-to-text-*-Linux.rpm
 ```
 
 The package pulls in `qt6-qtbase-gui`. It does **not** include a speech model:

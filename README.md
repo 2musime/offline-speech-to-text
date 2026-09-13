@@ -9,7 +9,7 @@ for transcription, CPU only.
 ## Install
 
 ```bash
-sudo dnf install ./audio-to-text-1.0.1-Linux.rpm
+sudo dnf install ./audio-to-text-*-Linux.rpm
 audio-to-text-install-model base.en --user
 audio_to_text
 ```
