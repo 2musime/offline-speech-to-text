@@ -84,7 +84,8 @@ Compare against [PERFORMANCE.md](PERFORMANCE.md). Run-to-run variance is about
 On a Windows machine, from the same commit:
 
 ```bat
-cmake -S . -B build-release -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64"
+cmake -S . -B build-release -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64" ^
+  -DAUDIO_TO_TEXT_BUNDLE_MODEL=ON
 cmake --build build-release --config Release --parallel
 cpack -C Release
 ```
@@ -133,7 +134,7 @@ formats and says which generator it skipped.
 | Start Menu shortcut (Windows) | yes | created by the NSIS installer |
 | Qt 6 (Windows) | yes | no distribution to provide it; `windeployqt` copies it in at install time |
 | `audio-to-text-install-model`, `install-model.ps1` | yes | fetches a model after installation |
-| Whisper models | **no** | hundreds of megabytes, and downloading is the one networked step |
+| Whisper models | **Windows only** | `base.en` ships in the Windows package, which has no distribution to fetch one from; the Fedora package still downloads it |
 
 Models are deliberately excluded. Packaging one would make the download implicit
 and inflate the package by an order of magnitude.

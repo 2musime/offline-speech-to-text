@@ -1179,6 +1179,14 @@ int run(int argc, char** argv) {
         fs::current_path() / "models",
         data_directory / "models"
     };
+    // A model shipped beside the application. This is how a package that
+    // includes one supplies it, and it is the only root that does not depend on
+    // the working directory -- which nothing sets when a program is started
+    // from a menu entry or a desktop shortcut.
+    const fs::path beside_executable = executable_directory();
+    if (!beside_executable.empty()) {
+        model_roots.push_back(beside_executable / "models");
+    }
     for (const std::string& directory : model_directories) {
         model_roots.emplace_back(directory);
     }

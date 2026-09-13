@@ -108,11 +108,20 @@ copies the Qt libraries and the platform plugin beside it. If `windeployqt`
 cannot be found, CMake says so at configure time and the installed application
 will not start.
 
-To produce an archive:
+To produce the release artifacts, with the model inside them:
 
 ```bat
-cpack -G ZIP -C Release
+cmake -S . -B build -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64" ^
+  -DAUDIO_TO_TEXT_BUNDLE_MODEL=ON
+cmake --build build --config Release --parallel
+cpack -C Release
 ```
+
+`AUDIO_TO_TEXT_BUNDLE_MODEL` downloads `base.en` once per build tree, about
+142 MB, and checks it against the hash pinned in `CMakeLists.txt`. It lands in
+`models` beside the executables, which the worker accepts as a model directory.
+Leave the option off for ordinary development builds; nobody compiling a change
+should have to wait for a download.
 
 `cpack` produces the NSIS installer when `makensis` is on PATH, and the ZIP
 either way. The installer adds a Start Menu entry and carries the application

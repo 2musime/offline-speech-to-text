@@ -577,6 +577,42 @@ void test_storage_portability() {
     CHECK("the data directory is absolute", data.is_absolute());
     CHECK("the data directory is named for the application",
           data.filename().string().find("audio-to-text") != std::string::npos);
+
+    // A model shipped beside the application is found through this, so it has
+    // to be an absolute directory that really holds the running binary. On a
+    // platform with no way to ask, it is empty rather than wrong.
+    const fs::path beside = executable_directory();
+#if defined(_WIN32) || defined(__linux__)
+    CHECK("the executable directory is known", !beside.empty());
+    CHECK("the executable directory is absolute", beside.is_absolute());
+    CHECK("the executable directory exists", fs::is_directory(beside));
+    // This test binary is in it, which is the property the model root relies on.
+    bool holds_a_binary = false;
+    for (const fs::directory_entry& entry : fs::directory_iterator(beside, error)) {
+        if (entry.path().filename().string().find("audio_to_text") != std::string::npos) {
+            holds_a_binary = true;
+        }
+    }
+    CHECK("the executable directory holds this binary", holds_a_binary);
+
+    // A model beside the application resolves; one outside every root does not.
+    const fs::path models = beside / "models";
+    fs::create_directories(models, error);
+    const fs::path bundled = models / "ggml-bundled.bin";
+    { std::ofstream file(bundled, std::ios::binary); file << "not a real model"; }
+    const std::vector<fs::path> roots{beside / "models"};
+    fs::path approved;
+    std::string reason;
+    CHECK("a model beside the application is approved",
+          resolve_model_path(bundled.string(), roots, approved, reason));
+    const fs::path outsider = scratch_directory() / "outside.bin";
+    { std::ofstream file(outsider, std::ios::binary); file << "not a real model"; }
+    CHECK_FALSE("a model outside every root is refused",
+                resolve_model_path(outsider.string(), roots, approved, reason));
+    fs::remove(bundled, error);
+#else
+    CHECK("an unknown executable directory is empty, not wrong", beside.empty());
+#endif
 }
 
 // Whisper prefixes every segment with a space, so a joined transcript would

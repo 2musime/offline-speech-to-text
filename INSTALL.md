@@ -39,8 +39,14 @@ The GUI also appears in the desktop menu under Sound &amp; Video.
 ## From a package (Windows)
 
 Run `audio-to-text-<version>-win64.exe` and accept the default location. The
-installer places the program, the Whisper libraries and the Qt libraries in one
-directory, and adds **Audio to Text** to the Start Menu.
+installer places the program, the Whisper libraries, the Qt libraries **and the
+`base.en` speech model** in one directory, and adds **Audio to Text** to the
+Start Menu. There is nothing else to download and nothing to configure: open it
+from the Start Menu and record.
+
+That is the only difference from the Fedora package, where the model is fetched
+separately. Windows has no distribution to provide one, and a first run that
+ends in a PowerShell command is a poor way to meet an application.
 
 Windows will warn before it runs: the installer is not code-signed, so
 SmartScreen shows *"Windows protected your PC"*. Choose **More info**, then
@@ -48,13 +54,14 @@ SmartScreen shows *"Windows protected your PC"*. Choose **More info**, then
 certificate, and you should be suspicious of any download that asks you to
 bypass the warning -- verify the file came from this project's releases page.
 
-The ZIP is the same files with no installer and no Start Menu entry. Unpack it
-anywhere and run `bin\audio_to_text.exe`.
+The ZIP is the same files, model included, with no installer and no Start Menu
+entry. Unpack it anywhere and run `bin\audio_to_text.exe`. Keep the `models`
+folder beside the executable; that is where it is found.
 
-No model is included. Fetch one:
+To use a different model, `small.en` for better accuracy:
 
 ```powershell
-& "$env:ProgramFiles\Audio to Text\bin\install-model.ps1" base.en
+& "$env:ProgramFiles\Audio to Text\bin\install-model.ps1" small.en
 ```
 
 It downloads into `%LOCALAPPDATA%\audio-to-text\models` and prints the file's

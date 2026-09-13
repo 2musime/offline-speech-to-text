@@ -99,6 +99,14 @@ c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d  ggml-small.en.
 These are an observation, not a published reference. Verify against a fresh
 download over HTTPS from the source above if provenance matters to you.
 
+The `base.en` hash is also pinned in `CMakeLists.txt` as
+`AUDIO_TO_TEXT_BUNDLED_MODEL_SHA256`, and the Windows package build downloads
+the model and checks it against that value. The weakness of an unpublished
+checksum is its strength here: if the file behind that URL ever changes, the
+package build stops rather than quietly shipping different weights. Should the
+change turn out to be legitimate, verify the new file and update both places
+together.
+
 ## Checks
 
 ```bash
