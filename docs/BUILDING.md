@@ -114,17 +114,19 @@ To produce an archive:
 cpack -G ZIP -C Release
 ```
 
+`cpack` produces the NSIS installer when `makensis` is on PATH, and the ZIP
+either way. The installer adds a Start Menu entry and carries the application
+icon; `scripts/install-model.ps1` is installed beside the executables.
+
 ### What is not there yet
 
-- **No installer.** The ZIP is unpack-and-run. A Start Menu shortcut and a
-  signed installer are separate work.
-- **No model downloader.** `scripts/install-model.sh` is a shell script and is
-  not installed on Windows. Fetch the model by hand into
-  `%LOCALAPPDATA%\audio-to-text\models\` for now.
 - **Unsigned binaries.** SmartScreen will warn on anything downloaded from the
   internet until the installer is code-signed.
-- **The command-line test suite does not run.** See
-  [TESTING.md](TESTING.md).
+- **The command-line test suite does not run**, and neither do the sanitizers.
+  See [TESTING.md](TESTING.md) and [QUALITY_GATES.md](QUALITY_GATES.md).
+- **Nothing here has been run on Windows.** It configures, installs and
+  packages from the same source as the Linux build, and that is all that is
+  known.
 
 ## Checks before pushing
 

@@ -16,6 +16,7 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMenu>
@@ -1791,6 +1792,12 @@ private:
 
 int main(int argc, char* argv[]) {
     QApplication application(argc, argv);
+    // Set on the application rather than the window, so message boxes and file
+    // dialogs carry it too. On Linux a desktop environment matches a running
+    // window to its desktop entry by this name, which is how the launcher and
+    // the taskbar end up showing the same icon.
+    application.setDesktopFileName("audio-to-text");
+    application.setWindowIcon(QIcon(":/icons/audio-to-text-512.png"));
     AudioToTextWindow window;
     window.show();
     return application.exec();

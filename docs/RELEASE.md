@@ -129,7 +129,7 @@ formats and says which generator it skipped.
 | `audio_to_text`, `audio_to_text_cli` | yes | the application |
 | `libwhisper`, `libggml`, `libggml-base`, `libggml-cpu` | yes, privately | built from the pinned submodule; installed to `/usr/lib64/audio-to-text` rather than competing with a system Whisper |
 | Qt 6 | no, required | comes from the distribution as `qt6-qtbase-gui` |
-| Desktop entry (Linux) | yes | so the GUI appears in the menu |
+| Desktop entry and icons (Linux) | yes | so the GUI appears in the menu with its icon |
 | Start Menu shortcut (Windows) | yes | created by the NSIS installer |
 | Qt 6 (Windows) | yes | no distribution to provide it; `windeployqt` copies it in at install time |
 | `audio-to-text-install-model`, `install-model.ps1` | yes | fetches a model after installation |

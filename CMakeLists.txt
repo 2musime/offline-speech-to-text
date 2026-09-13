@@ -93,6 +93,21 @@ add_executable(audio_to_text
     miniaudio_impl.cpp
 )
 
+if(WIN32)
+    # Compiled into the executable, which is where Explorer, the taskbar and
+    # Alt-Tab look for an icon. Nothing at run time reads it.
+    target_sources(audio_to_text PRIVATE packaging/audio-to-text.rc)
+endif()
+
+# The window's own icon, compiled in rather than loaded from disk so it is
+# present in the build tree and after an install to any prefix. A PNG rather
+# than the .ico: PNG decoding is built into Qt, while ICO arrives as a plugin
+# that may not be deployed, and a missing plugin fails silently.
+qt_add_resources(audio_to_text "audio_to_text_icon"
+    PREFIX "/icons"
+    BASE packaging/icons
+    FILES packaging/icons/audio-to-text-512.png)
+
 target_include_directories(audio_to_text PRIVATE
     .
     third_party
@@ -232,6 +247,13 @@ else()
     install(FILES packaging/audio-to-text.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 
+    # Named audio-to-text to match Icon= in the desktop entry. The sizes are
+    # separate files rather than one scaled image because a desktop environment
+    # picks the exact size it needs, and a 512 pixel glyph scaled to 16 loses
+    # the thin strokes.
+    install(DIRECTORY packaging/icons/hicolor
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
+
     install(PROGRAMS scripts/install-model.sh
         DESTINATION ${CMAKE_INSTALL_BINDIR}
         RENAME audio-to-text-install-model)
@@ -308,6 +330,10 @@ if(WIN32)
     # the files windeployqt left behind last time.
     set(CPACK_NSIS_MODIFY_PATH OFF)
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/audio-to-text.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/audio-to-text.ico")
+    # What Add/Remove Programs shows beside the entry.
+    set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\audio_to_text.exe")
     # Recordings and transcripts live in %LOCALAPPDATA% and are the user's, not
     # the installer's. Uninstalling removes the program and leaves them alone.
 else()
@@ -320,8 +346,11 @@ else()
     # deliberately not packaged, being hundreds of megabytes.
     set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtbase-gui")
     set(CPACK_RPM_PACKAGE_AUTOREQPROV "no")
+    # These directories belong to other packages; this one only adds files to
+    # them. hicolor-icon-theme owns the icon tree.
     set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
-        "/usr/lib64" "/usr/share/applications" "/usr/share/doc")
+        "/usr/lib64" "/usr/share/applications" "/usr/share/doc"
+        "/usr/share/icons" "/usr/share/icons/hicolor")
 endif()
 
 include(CPack)
