@@ -9,6 +9,7 @@
 // out, reused rather than restated.
 
 #include "file_storage.h"
+#include "wav_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -246,4 +247,103 @@ inline CompanionAudio companion_audio(
     audio.has_cleaned = readable_inside(audio.cleaned, data_directory);
     audio.has_speech = readable_inside(audio.speech, data_directory);
     return audio;
+}
+
+// A recording a user can play back. This is the raw capture, not the cleaned
+// copy and not the extracted speech: playback should give back what was said,
+// exactly as the microphone heard it. The processed versions exist for Whisper.
+struct RecordingEntry {
+    fs::path path;
+    SessionStamp stamp;
+    std::uintmax_t size_bytes = 0;
+    double seconds = 0.0;
+    bool has_transcript = false;
+};
+
+inline constexpr const char* recording_suffix = "-recording.wav";
+
+// Raw recordings, newest first. Same rules as the transcripts: anything
+// malformed, linked, or outside the data directory is skipped rather than
+// allowed to break the listing.
+inline std::vector<RecordingEntry> list_recordings(const fs::path& data_directory) {
+    const fs::path directory = data_directory / "recordings";
+    std::vector<RecordingEntry> entries;
+
+    std::error_code error;
+    if (!fs::is_directory(directory, error) || error) {
+        return entries;
+    }
+
+    const std::string suffix = recording_suffix;
+    for (const fs::directory_entry& item : fs::directory_iterator(directory, error)) {
+        if (error) {
+            break;
+        }
+        if (!readable_inside(item.path(), data_directory)) {
+            continue;
+        }
+
+        const std::string name = item.path().filename().string();
+        if (name.size() <= suffix.size() ||
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+            continue;
+        }
+
+        RecordingEntry entry;
+        if (!parse_session_stamp(name.substr(0, name.size() - suffix.size()), entry.stamp)) {
+            continue;
+        }
+
+        std::error_code size_error;
+        entry.size_bytes = fs::file_size(item.path(), size_error);
+        if (size_error) {
+            entry.size_bytes = 0;
+        }
+        entry.path = item.path();
+        if (!wav_duration_seconds(item.path(), entry.seconds)) {
+            entry.seconds = 0.0;
+        }
+        const fs::path transcript =
+            data_directory / "transcripts" / (entry.stamp.text + transcript_suffix);
+        entry.has_transcript = readable_inside(transcript, data_directory);
+        entries.push_back(entry);
+    }
+
+    std::sort(entries.begin(), entries.end(),
+              [](const RecordingEntry& a, const RecordingEntry& b) {
+                  return b.stamp < a.stamp;
+              });
+    return entries;
+}
+
+// Deletes one recording and the processed copies made from it. The transcript
+// is deliberately left: text is small, and losing it with the audio would be a
+// surprise.
+inline bool delete_recording(
+    const fs::path& path,
+    const SessionStamp& stamp,
+    const fs::path& data_directory,
+    std::string& reason) {
+    if (!readable_inside(path, data_directory)) {
+        reason = "Refusing to delete a file outside the application's own directory: " +
+            path.string();
+        return false;
+    }
+
+    const fs::path directory = data_directory / "recordings";
+    bool removed_any = false;
+    for (const char* kind : {"-recording.wav", "-cleaned.wav", "-speech.wav"}) {
+        const fs::path candidate = directory / (stamp.text + kind);
+        if (!readable_inside(candidate, data_directory)) {
+            continue;
+        }
+        std::error_code error;
+        if (fs::remove(candidate, error) && !error) {
+            removed_any = true;
+        }
+    }
+    if (!removed_any) {
+        reason = "Could not delete the recording: " + path.string();
+    }
+    return removed_any;
 }

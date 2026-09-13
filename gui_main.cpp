@@ -1,3 +1,4 @@
+#include "audio_player.h"
 #include "partial_text.h"
 #include "transcript_library.h"
 #include "ui_state.h"
@@ -30,6 +31,7 @@
 #include <QListWidget>
 #include <QActionGroup>
 #include <QShortcut>
+#include <QSlider>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QVBoxLayout>
@@ -284,12 +286,128 @@ public:
         go_row->addWidget(go_record_button_);
         go_row->addStretch();
         home_layout->addLayout(go_row);
+        home_layout->addSpacing(24);
+
+        home_summary_ = new QLabel(home_page);
+        home_summary_->setAlignment(Qt::AlignCenter);
+        home_summary_->setEnabled(false);
+        home_layout->addWidget(home_summary_);
         home_layout->addStretch();
+
+        // ---- Speeches: play back what was actually said. This is the raw
+        // capture, not the cleaned copy or the extracted speech; those exist
+        // for Whisper, and are not what someone wants to hear.
+        speech_list_ = new QListWidget(this);
+        speech_list_->setAlternatingRowColors(true);
+        speech_list_->setMinimumWidth(300);
+        speech_list_->setTextElideMode(Qt::ElideRight);
+        speech_list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        speech_list_->setAccessibleName("Recordings");
+
+        auto* speech_page = new QWidget(this);
+        auto* speech_layout = new QVBoxLayout(speech_page);
+        speech_layout->setSpacing(12);
+
+        auto* speech_header = new QHBoxLayout();
+        auto* speech_title = new QLabel("Speeches", speech_page);
+        QFont speech_font = speech_title->font();
+        speech_font.setBold(true);
+        speech_title->setFont(speech_font);
+        speech_header->addWidget(speech_title);
+        speech_header->addStretch();
+        speech_layout->addLayout(speech_header);
+
+        auto* speech_body = new QHBoxLayout();
+        speech_body->setSpacing(12);
+        speech_body->addWidget(speech_list_);
+
+        auto* player_panel = new QWidget(speech_page);
+        auto* player_layout = new QVBoxLayout(player_panel);
+        player_layout->setContentsMargins(0, 0, 0, 0);
+        player_layout->setSpacing(12);
+
+        // Header matches the transcripts screen, so the two read the same way.
+        now_playing_ = new QLabel("Select a recording to play it", player_panel);
+        QFont playing_font = now_playing_->font();
+        playing_font.setBold(true);
+        now_playing_->setFont(playing_font);
+        now_playing_->setAlignment(Qt::AlignCenter);
+        player_layout->addWidget(now_playing_);
+
+        auto* transport_panel = new QGroupBox(player_panel);
+        auto* transport_layout = new QVBoxLayout(transport_panel);
+        transport_layout->setSpacing(10);
+
+        play_button_ = new QPushButton("Play", transport_panel);
+        play_button_->setMinimumHeight(40);
+        play_button_->setMinimumWidth(130);
+        QFont play_font = play_button_->font();
+        play_font.setBold(true);
+        play_button_->setFont(play_font);
+        play_button_->setEnabled(false);
+        stop_play_button_ = new QPushButton("Stop", transport_panel);
+        stop_play_button_->setMinimumHeight(40);
+        stop_play_button_->setEnabled(false);
+
+        play_time_ = new QLabel("00:00 / 00:00", transport_panel);
+        QFont time_font = play_time_->font();
+        time_font.setPointSize(time_font.pointSize() + 3);
+        play_time_->setFont(time_font);
+
+        auto* transport = new QHBoxLayout();
+        transport->addStretch();
+        transport->addWidget(play_button_);
+        transport->addWidget(stop_play_button_);
+        transport->addSpacing(20);
+        transport->addWidget(play_time_);
+        transport->addStretch();
+        transport_layout->addLayout(transport);
+
+        position_slider_ = new QSlider(Qt::Horizontal, transport_panel);
+        position_slider_->setRange(0, 0);
+        position_slider_->setEnabled(false);
+        transport_layout->addWidget(position_slider_);
+        player_layout->addWidget(transport_panel);
+
+        // The space under the controls was empty; this is what belongs in it.
+        recording_details_ = new QLabel(player_panel);
+        recording_details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        recording_details_->setWordWrap(true);
+        recording_details_->setEnabled(false);
+        recording_details_->setAlignment(Qt::AlignCenter);
+        player_layout->addWidget(recording_details_);
+        player_layout->addStretch();
+
+        delete_speech_ = new QPushButton("Delete Recording", player_panel);
+        delete_speech_->setEnabled(false);
+        delete_speech_->setMinimumHeight(32);
+        delete_speech_->setCursor(Qt::PointingHandCursor);
+        delete_speech_->setToolTip("Delete this recording and its processed copies. "
+                                  "The transcript is kept.");
+        delete_speech_->setStyleSheet(
+            "QPushButton {"
+            "  background-color: #c1440e;"
+            "  color: #ffffff;"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "  padding: 6px 18px;"
+            "}"
+            "QPushButton:hover  { background-color: #a63a0c; }"
+            "QPushButton:pressed { background-color: #8c3009; }"
+            "QPushButton:disabled { background-color: #e0ccc4; color: #9a8d88; }");
+        auto* speech_footer = new QHBoxLayout();
+        speech_footer->addStretch();
+        speech_footer->addWidget(delete_speech_);
+        player_layout->addLayout(speech_footer);
+
+        speech_body->addWidget(player_panel, 1);
+        speech_layout->addLayout(speech_body, 1);
 
         stack_ = new QStackedWidget(this);
         stack_->addWidget(home_page);
         stack_->addWidget(central);
         stack_->addWidget(library_page);
+        stack_->addWidget(speech_page);
         setCentralWidget(stack_);
 
         // ---- Status bar: context that used to be four stacked labels.
@@ -311,6 +429,10 @@ public:
         // display keeps moving between chunk reports.
         processing_timer_ = new QTimer(this);
         processing_timer_->setInterval(1000);
+        // Playback position lives on the audio thread; this is how the slider
+        // and clock learn about it.
+        play_timer_ = new QTimer(this);
+        play_timer_->setInterval(200);
 
         populate_devices();
         // Resolved here rather than waiting for the worker, so saved
@@ -318,6 +440,16 @@ public:
         data_directory_ = QString::fromStdString(application_data_directory().string());
         connect(go_record_button_, &QPushButton::clicked, this, [this] { show_recorder(); });
         connect(delete_all_button_, &QPushButton::clicked, this, [this] { delete_recordings(); });
+        connect(speech_list_, &QListWidget::currentRowChanged, this,
+                [this](int row) { select_recording(row); });
+        connect(play_button_, &QPushButton::clicked, this, [this] { toggle_playback(); });
+        connect(stop_play_button_, &QPushButton::clicked, this, [this] { stop_playback(); });
+        connect(delete_speech_, &QPushButton::clicked, this,
+                [this] { delete_selected_recording(); });
+        connect(position_slider_, &QSlider::sliderReleased, this, [this] {
+            player_.seek_seconds(position_slider_->value());
+            refresh_play_time();
+        });
         connect(saved_copy_, &QPushButton::clicked, this, [this] { copy_saved(); });
         connect(saved_save_, &QPushButton::clicked, this, [this] { save_saved(); });
         connect(delete_saved_, &QPushButton::clicked, this, [this] { delete_selected_transcript(); });
@@ -350,6 +482,7 @@ public:
                 this, [this](int exit_code, QProcess::ExitStatus status) { handle_worker_exit(exit_code, status); });
         connect(timer_, &QTimer::timeout, this, [this] { refresh_elapsed(); });
         connect(processing_timer_, &QTimer::timeout, this, [this] { report_transcription_progress(); });
+        connect(play_timer_, &QTimer::timeout, this, [this] { refresh_play_time(); });
         connect(limit_timer_, &QTimer::timeout, this, [this] {
             if (state_ != UiState::Recording) {
                 return;
@@ -614,6 +747,8 @@ private:
                                       [this] { show_recorder(); });
         history_action_ = add_screen("&Transcripts", QKeySequence("Ctrl+H"),
                                      [this] { show_library(); });
+        speeches_action_ = add_screen("&Speeches", QKeySequence("Ctrl+P"),
+                                      [this] { show_speeches(); });
 
         QMenu* help_menu = menuBar()->addMenu("&Help");
         help_menu->addAction("&Privacy", this, [this] { show_privacy_notice(); });
@@ -710,6 +845,7 @@ private:
         history_action_->setEnabled(controls.history);
         home_action_->setEnabled(!ui_state_is_busy(state));
         recorder_action_->setEnabled(!ui_state_is_busy(state));
+        speeches_action_->setEnabled(controls.history);
         delete_all_button_->setEnabled(controls.delete_recordings);
 
         apply_indicator(state);
@@ -804,16 +940,209 @@ private:
         if (ui_state_is_busy(state_)) {
             return;
         }
+        stop_playback_if_running();
         stack_->setCurrentIndex(0);
         home_action_->setChecked(true);
         context_label_->setText("Ready when you are");
+        refresh_home_summary();
         apply_state(state_);
+    }
+
+    // Home is otherwise silent about what the application already holds, which
+    // gives no reason to visit the other screens.
+    void refresh_home_summary() {
+        const fs::path root(data_directory_.toStdString());
+        const std::size_t recordings = list_recordings(root).size();
+        const std::size_t transcripts = list_transcripts(root).size();
+        if (recordings == 0 && transcripts == 0) {
+            home_summary_->setText(QString());
+            return;
+        }
+        home_summary_->setText(QString("%1 recording%2  ·  %3 transcript%4")
+            .arg(recordings).arg(recordings == 1 ? "" : "s")
+            .arg(transcripts).arg(transcripts == 1 ? "" : "s"));
+    }
+
+    void show_speeches() {
+        if (!ui_state_may_start(state_)) {
+            return;
+        }
+        refresh_speeches();
+        stack_->setCurrentIndex(3);
+        speeches_action_->setChecked(true);
+        context_label_->setText(recordings_.empty()
+            ? QString("No recordings")
+            : QString("%1 recording%2").arg(recordings_.size())
+                  .arg(recordings_.size() == 1 ? "" : "s"));
+        record_action_->setEnabled(false);
+        cancel_action_->setEnabled(false);
+        speech_list_->setFocus();
+    }
+
+    void refresh_speeches() {
+        const int previous = speech_list_->currentRow();
+        const QSignalBlocker blocker(speech_list_);
+        speech_list_->clear();
+        recordings_ = list_recordings(fs::path(data_directory_.toStdString()));
+
+        if (recordings_.empty()) {
+            auto* empty = new QListWidgetItem(
+                "No recordings yet\n\nGo to Recording to make one", speech_list_);
+            empty->setFlags(Qt::NoItemFlags);
+            return;
+        }
+
+        for (const RecordingEntry& entry : recordings_) {
+            // The name the file carries, and nothing else. Length and transcript
+            // status belong to the recording being played, not to the list.
+            char stamp[32];
+            std::tm shown = entry.stamp.when;
+            std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
+            auto* item = new QListWidgetItem(
+                QString("recording-%1").arg(QString::fromUtf8(stamp)), speech_list_);
+            item->setToolTip(QString::fromStdString(entry.path.string()));
+        }
+        if (previous >= 0 && previous < speech_list_->count()) {
+            speech_list_->setCurrentRow(previous);
+        }
+    }
+
+    void select_recording(int row) {
+        player_.unload();
+        play_timer_->stop();
+        if (row < 0 || row >= static_cast<int>(recordings_.size())) {
+            now_playing_->setText(recordings_.empty()
+                ? QString("Nothing recorded yet")
+                : QString("Select a recording to play it"));
+            recording_details_->setText(QString());
+            play_button_->setEnabled(false);
+            stop_play_button_->setEnabled(false);
+            delete_speech_->setEnabled(false);
+            position_slider_->setEnabled(false);
+            position_slider_->setRange(0, 0);
+            play_time_->setText("00:00 / 00:00");
+            return;
+        }
+
+        const RecordingEntry& entry = recordings_[static_cast<std::size_t>(row)];
+        std::string reason;
+        if (!player_.load(entry.path, reason)) {
+            now_playing_->setText("Could not open this recording");
+            recording_details_->setText(QString::fromStdString(reason));
+            play_button_->setEnabled(false);
+            stop_play_button_->setEnabled(false);
+            delete_speech_->setEnabled(true);
+            return;
+        }
+
+        char when[64];
+        std::tm shown = entry.stamp.when;
+        std::strftime(when, sizeof(when), "%d %b %Y at %H:%M", &shown);
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
+        now_playing_->setText(QString("recording-%1").arg(QString::fromUtf8(stamp)));
+        recording_details_->setText(QString("%1 long, %2 MB.  %3")
+            .arg(QTime(0, 0).addSecs(static_cast<int>(entry.seconds)).toString("mm:ss"),
+                 QString::number(entry.size_bytes / (1024.0 * 1024.0), 'f', 1),
+                 entry.has_transcript ? "Transcribed." : "Not transcribed."));
+        play_button_->setEnabled(true);
+        play_button_->setText("Play");
+        stop_play_button_->setEnabled(true);
+        delete_speech_->setEnabled(true);
+        position_slider_->setEnabled(true);
+        position_slider_->setRange(0, static_cast<int>(player_.duration_seconds()));
+        position_slider_->setValue(0);
+        refresh_play_time();
+    }
+
+    void toggle_playback() {
+        if (!player_.is_loaded()) {
+            return;
+        }
+        if (player_.is_playing()) {
+            player_.pause();
+            play_button_->setText("Play");
+            play_timer_->stop();
+        } else if (player_.play()) {
+            play_button_->setText("Pause");
+            play_timer_->start();
+        }
+        refresh_play_time();
+    }
+
+    void stop_playback() {
+        player_.stop();
+        play_timer_->stop();
+        play_button_->setText("Play");
+        position_slider_->setValue(0);
+        refresh_play_time();
+    }
+
+    void refresh_play_time() {
+        const int position = static_cast<int>(player_.position_seconds());
+        const int total = static_cast<int>(player_.duration_seconds());
+        const char* format = total >= 3600 ? "hh:mm:ss" : "mm:ss";
+        play_time_->setText(QString("%1 / %2")
+            .arg(QTime(0, 0).addSecs(position).toString(format),
+                 QTime(0, 0).addSecs(total).toString(format)));
+        if (!position_slider_->isSliderDown()) {
+            const QSignalBlocker blocker(position_slider_);
+            position_slider_->setValue(position);
+        }
+        // Playback runs on its own thread; this is how the interface learns it
+        // reached the end.
+        if (player_.has_finished() && player_.is_playing()) {
+            stop_playback();
+        }
+    }
+
+    void delete_selected_recording() {
+        const int row = speech_list_->currentRow();
+        if (row < 0 || row >= static_cast<int>(recordings_.size())) {
+            return;
+        }
+        const RecordingEntry entry = recordings_[static_cast<std::size_t>(row)];
+        char when[64];
+        std::tm shown = entry.stamp.when;
+        std::strftime(when, sizeof(when), "%d %b %Y, %H:%M", &shown);
+
+        const auto choice = QMessageBox::question(this, "Delete recording",
+            QString("Delete the recording from %1?\n\nIts transcript is kept. "
+                    "This cannot be undone.").arg(QString::fromUtf8(when)),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes) {
+            return;
+        }
+
+        // Released before deleting: the file is open for playback.
+        player_.unload();
+        play_timer_->stop();
+
+        std::string reason;
+        if (!delete_recording(entry.path, entry.stamp,
+                              fs::path(data_directory_.toStdString()), reason)) {
+            QMessageBox::warning(this, "Could not delete", QString::fromStdString(reason));
+            return;
+        }
+
+        refresh_speeches();
+        const int remaining = static_cast<int>(recordings_.size());
+        if (remaining == 0) {
+            select_recording(-1);
+        } else {
+            const int next = qBound(0, row, remaining - 1);
+            const QSignalBlocker blocker(speech_list_);
+            speech_list_->setCurrentRow(next);
+            select_recording(next);
+        }
+        statusBar()->showMessage("Recording deleted", 3000);
     }
 
     void show_library() {
         if (!ui_state_may_start(state_)) {
             return;
         }
+        stop_playback_if_running();
         refresh_history();
         stack_->setCurrentIndex(2);
         // The status bar belongs to whichever screen is showing.
@@ -828,7 +1157,15 @@ private:
         history_list_->setFocus();
     }
 
+    void stop_playback_if_running() {
+        if (player_.is_loaded()) {
+            stop_playback();
+            player_.unload();
+        }
+    }
+
     void show_recorder() {
+        stop_playback_if_running();
         // Microphones are plugged in and unplugged while the application runs.
         // Re-reading on arrival keeps the indices honest.
         if (ui_state_may_start(state_)) {
@@ -857,7 +1194,8 @@ private:
         entries_ = list_transcripts(fs::path(data_directory_.toStdString()));
 
         if (entries_.empty()) {
-            auto* empty = new QListWidgetItem("No saved transcripts yet", history_list_);
+            auto* empty = new QListWidgetItem(
+                "No saved transcripts yet\n\nGo to Recording to make one", history_list_);
             empty->setFlags(Qt::NoItemFlags);
             return;
         }
@@ -1136,6 +1474,9 @@ private:
         if (stack_->currentIndex() == 2) {
             refresh_history();
         }
+        if (stack_->currentIndex() == 3) {
+            refresh_speeches();
+        }
     }
 
     // Worker reports arrive as SEVERITY|CATEGORY|message.
@@ -1377,12 +1718,23 @@ private:
     QListWidget* history_list_;
     QStackedWidget* stack_;
     QPushButton* go_record_button_;
+    QLabel* home_summary_;
     QPushButton* delete_all_button_;
     QPlainTextEdit* saved_view_;
     QLabel* saved_title_;
     QPushButton* saved_save_;
     QPushButton* saved_copy_;
     QPushButton* delete_saved_;
+    QListWidget* speech_list_;
+    QLabel* now_playing_;
+    QLabel* play_time_;
+    QPushButton* play_button_;
+    QPushButton* stop_play_button_;
+    QPushButton* delete_speech_;
+    QLabel* recording_details_;
+    QSlider* position_slider_;
+    std::vector<RecordingEntry> recordings_;
+    AudioPlayer player_;
     QAction* history_action_;
     std::vector<TranscriptEntry> entries_;
     QLabel* context_label_;
@@ -1390,6 +1742,7 @@ private:
     QString input_summary_;
     QString storage_summary_;
     QAction* home_action_;
+    QAction* speeches_action_;
     QAction* recorder_action_;
     QAction* record_action_;
     QAction* cancel_action_;
@@ -1401,6 +1754,7 @@ private:
     QTimer* timer_;
     QTimer* limit_timer_;
     QTimer* processing_timer_;
+    QTimer* play_timer_;
     QElapsedTimer elapsed_;
     UiState state_ = UiState::Ready;
     int limit_seconds_ = 0;

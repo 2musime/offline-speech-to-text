@@ -59,6 +59,50 @@ inline bool write_wav(const fs::path& path, const std::vector<std::int16_t>& sam
     return file.commit();
 }
 
+// Duration from the header alone. Listing a directory of recordings must not
+// mean reading every sample of every one of them.
+inline bool wav_duration_seconds(const fs::path& path, double& seconds) {
+    std::ifstream file(path, std::ios::binary);
+    char riff[12];
+    if (!file.read(riff, sizeof(riff)) || std::memcmp(riff, "RIFF", 4) != 0 ||
+        std::memcmp(riff + 8, "WAVE", 4) != 0) {
+        return false;
+    }
+
+    std::uint32_t sample_rate = 0;
+    std::uint16_t channels = 0;
+    std::uint16_t bits = 0;
+    while (true) {
+        char id[4];
+        char size_bytes[4];
+        if (!file.read(id, sizeof(id)) || !file.read(size_bytes, sizeof(size_bytes))) {
+            return false;
+        }
+        std::uint32_t chunk_size = 0;
+        std::memcpy(&chunk_size, size_bytes, sizeof(chunk_size));
+
+        if (std::memcmp(id, "fmt ", 4) == 0 && chunk_size >= 16) {
+            char fmt[16];
+            if (!file.read(fmt, sizeof(fmt))) {
+                return false;
+            }
+            std::memcpy(&channels, fmt + 2, sizeof(channels));
+            std::memcpy(&sample_rate, fmt + 4, sizeof(sample_rate));
+            std::memcpy(&bits, fmt + 14, sizeof(bits));
+            file.seekg(chunk_size - 16, std::ios::cur);
+        } else if (std::memcmp(id, "data", 4) == 0) {
+            if (sample_rate == 0 || channels == 0 || bits == 0) {
+                return false;
+            }
+            const std::uint32_t frame = channels * (bits / 8);
+            seconds = frame > 0 ? static_cast<double>(chunk_size) / (frame * sample_rate) : 0.0;
+            return true;
+        } else {
+            file.seekg(chunk_size + (chunk_size & 1), std::ios::cur);
+        }
+    }
+}
+
 // Minimal RIFF/WAVE reader for benchmark input. Deliberately strict: the
 // recorder's own format only, so a mismatch is reported instead of silently
 // producing a meaningless measurement.

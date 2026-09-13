@@ -13,13 +13,15 @@ Three, one job each, chosen from the bar across the top:
 | **Home** | the application's name, what it does, and one button | opens here; `Home`, or `Ctrl+1` |
 | **Recording** | settings, the record panel, the live transcript | `Recording`, `Ctrl+2`, or **Start a Recording** |
 | **Transcripts** | the saved list and a reader | `Transcripts`, or `Ctrl+H` |
+| **Speeches** | recordings, and a player for them | `Speeches`, or `Ctrl+P` |
 
 The bar is navigation and nothing else. Pressing **Recording** goes to the
 recording screen; it does not start a recording. Starting is done there, with
 the model, microphone and limit already in view.
 
-Home is deliberately almost empty. It says what the application is and offers
-the one thing someone opening it wants.
+Home is deliberately almost empty. It says what the application is, offers the
+one thing someone opening it wants, and gives a count of what is already stored
+so there is a reason to look at the other screens.
 
 Navigation closes while a recording or transcription is running. The controls
 for something still running must not be hidden behind another screen.
@@ -128,6 +130,38 @@ Reading is confined the same way writing is: a path resolving outside the
 application's own directory, or one that is a symbolic link, is refused rather
 than followed. See [FILE_STORAGE.md](FILE_STORAGE.md).
 
+## Speeches
+
+`Speeches`, or `Ctrl+P`, lists every recording newest first, each named for when
+it was made:
+
+```text
+recording-20260913145545
+```
+
+That name and nothing else, left aligned as a list of files should be. Length,
+size and whether it was transcribed belong to the recording you have selected,
+not to every row, and appear beneath the player once one is chosen. The player
+itself is centred. Selecting a row loads it; **Play**, **Stop** and the position
+slider work as they do anywhere else.
+
+**What plays is the raw capture.** Each recording produces three files: the raw
+audio, a noise-reduced copy, and the speech extracted from it. Only the
+extracted speech is sent to Whisper. Playback deliberately gives back the raw
+recording, because that is what was actually said; the processed versions exist
+for transcription, not for listening.
+
+Playback stops when you leave the screen, so audio never continues behind a
+recording.
+
+**Delete Recording** removes the raw capture and its two processed copies. The
+transcript is kept: text is small, and losing it along with the audio would be a
+surprise. Deleting moves to a neighbouring recording rather than going blank.
+
+Audio is played through the vendored miniaudio, the same library used to
+capture, so the application needs no media framework and the package still
+depends only on `qt6-qtbase-gui`.
+
 ## Keyboard
 
 Every shortcut appears next to its menu entry, so it can be found rather than
@@ -142,6 +176,7 @@ memorised.
 | `Ctrl+1` | Go to Home |
 | `Ctrl+2` | Go to Recording |
 | `Ctrl+H` | Go to saved transcripts |
+| `Ctrl+P` | Go to recordings |
 | `Up` / `Down` | Move through the saved transcripts |
 | `Ctrl+Q` | Quit |
 
