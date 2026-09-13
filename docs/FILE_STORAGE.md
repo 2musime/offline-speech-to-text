@@ -98,7 +98,18 @@ Model files must resolve inside one of:
 
 - `./models` relative to the working directory
 - `<data>/models`
+- `models` beside the executable, which is how a package that ships a model
+  supplies one
 - any directory passed with `--model-dir`
+
+A model may be named either by path or by bare file name. A bare name --
+`ggml-base.en.bin`, with no directory in it -- is looked for in each of those
+directories in turn. The interface names models this way on purpose: a program
+started from a menu entry, a desktop shortcut or the Start Menu inherits no
+useful working directory, so a path relative to one cannot be relied on. A name
+containing a separator is still treated as a path and resolved as before, which
+keeps `audio_to_text_cli models/ggml-base.en.bin` working from a shell, and
+keeps traversal out of the search.
 
 The path is canonicalised first, so `../../etc/passwd` and a model reached
 through a symbolic link both land outside the approved roots and are refused:

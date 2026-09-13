@@ -13,15 +13,41 @@
 
 // Models must resolve inside an approved root; symbolic links are followed but
 // the destination still has to land inside one of those roots.
+//
+// A bare file name -- "ggml-base.en.bin", with no directory in it -- is looked
+// for in each root in turn. Without that, the only way to name a model is a
+// path relative to the working directory, and nothing sets a useful working
+// directory when a program is started from a menu entry, a desktop shortcut or
+// the Start Menu. The interface asks for a model by name for exactly this
+// reason; a path that already resolves is still honoured, so naming a file
+// directly from a shell keeps working.
 inline bool resolve_model_path(
     const std::string& requested,
     const std::vector<fs::path>& roots,
     fs::path& resolved,
     std::string& reason) {
     std::error_code error;
-    const fs::path canonical = fs::canonical(requested, error);
+    fs::path canonical = fs::canonical(requested, error);
+
+    if (error && fs::path(requested).filename() == fs::path(requested)) {
+        for (const fs::path& root : roots) {
+            std::error_code search_error;
+            const fs::path candidate = fs::canonical(root / requested, search_error);
+            if (!search_error && fs::is_regular_file(candidate, search_error)) {
+                canonical = candidate;
+                error.clear();
+                break;
+            }
+        }
+    }
+
     if (error) {
-        reason = "Model file does not exist or is not readable: " + requested;
+        std::string searched;
+        for (const fs::path& root : roots) {
+            searched += (searched.empty() ? "" : ", ") + root.string();
+        }
+        reason = "Model file does not exist or is not readable: " + requested +
+            ". Looked in: " + searched + ".";
         return false;
     }
     if (!fs::is_regular_file(canonical, error) || error) {

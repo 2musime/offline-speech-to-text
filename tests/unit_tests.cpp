@@ -605,6 +605,22 @@ void test_storage_portability() {
     std::string reason;
     CHECK("a model beside the application is approved",
           resolve_model_path(bundled.string(), roots, approved, reason));
+
+    // A bare name is searched for in the roots. This is what the interface
+    // sends, because a menu entry gives the process no useful working
+    // directory to resolve a relative path against.
+    CHECK("a bare model name is found in a root",
+          resolve_model_path("ggml-bundled.bin", roots, approved, reason));
+    CHECK("the bare name resolves to the file in that root",
+          approved == fs::canonical(bundled, error));
+    CHECK_FALSE("a bare name that is nowhere is refused",
+                resolve_model_path("ggml-absent.bin", roots, approved, reason));
+    CHECK("the refusal names where it looked",
+          reason.find("Looked in") != std::string::npos);
+    // A relative path is not a bare name, so the search does not apply to it
+    // and traversal cannot reach outside a root through this door.
+    CHECK_FALSE("a traversal is not treated as a bare name",
+                resolve_model_path("../ggml-bundled.bin", roots, approved, reason));
     const fs::path outsider = scratch_directory() / "outside.bin";
     { std::ofstream file(outsider, std::ios::binary); file << "not a real model"; }
     CHECK_FALSE("a model outside every root is refused",
