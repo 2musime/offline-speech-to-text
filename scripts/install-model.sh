@@ -41,17 +41,36 @@ case "$MODEL" in
 esac
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/third_party/whisper.cpp/models/download-ggml-model.sh"
-if [ ! -f "$SCRIPT" ]; then
-    echo "Missing $SCRIPT" >&2
-    echo "Run: git submodule update --init --recursive" >&2
-    exit 1
-fi
+SOURCE="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$MODEL.bin"
 
 mkdir -p "$DEST" || { echo "Cannot create $DEST" >&2; exit 1; }
-echo "Downloading $MODEL into $DEST"
-bash "$SCRIPT" "$MODEL" "$DEST" || exit 1
-
 FILE="$DEST/ggml-$MODEL.bin"
+echo "Downloading $MODEL into $DEST"
+
+if [ -f "$SCRIPT" ]; then
+    bash "$SCRIPT" "$MODEL" "$DEST" || exit 1
+else
+    # The installed copy of this script has no submodule beside it: the package
+    # ships the downloader, not the whole of whisper.cpp. Before this fallback
+    # existed, the command README tells you to run after installing the package
+    # failed on every machine that had not also cloned the source.
+    #
+    # Same file, same host, fetched directly. Written to a partial file first,
+    # so an interrupted download cannot be mistaken for a model.
+    PART="$FILE.part"
+    rm -f "$PART"
+    if command -v curl > /dev/null 2>&1; then
+        curl -L --fail --progress-bar --output "$PART" "$SOURCE" \
+            || { rm -f "$PART"; echo "Download failed." >&2; exit 1; }
+    elif command -v wget > /dev/null 2>&1; then
+        wget --quiet --show-progress -O "$PART" "$SOURCE" \
+            || { rm -f "$PART"; echo "Download failed." >&2; exit 1; }
+    else
+        echo "Either curl or wget is required to download a model." >&2
+        exit 1
+    fi
+    mv "$PART" "$FILE" || exit 1
+fi
 [ -f "$FILE" ] || { echo "Download did not produce $FILE" >&2; exit 1; }
 chmod 0644 "$FILE"
 echo ""

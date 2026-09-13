@@ -93,6 +93,21 @@ add_executable(audio_to_text
     miniaudio_impl.cpp
 )
 
+if(WIN32)
+    # Compiled into the executable, which is where Explorer, the taskbar and
+    # Alt-Tab look for an icon. Nothing at run time reads it.
+    target_sources(audio_to_text PRIVATE packaging/audio-to-text.rc)
+endif()
+
+# The window's own icon, compiled in rather than loaded from disk so it is
+# present in the build tree and after an install to any prefix. A PNG rather
+# than the .ico: PNG decoding is built into Qt, while ICO arrives as a plugin
+# that may not be deployed, and a missing plugin fails silently.
+qt_add_resources(audio_to_text "audio_to_text_icon"
+    PREFIX "/icons"
+    BASE packaging/icons
+    FILES packaging/icons/audio-to-text-512.png)
+
 target_include_directories(audio_to_text PRIVATE
     .
     third_party
@@ -222,12 +237,22 @@ else()
         RUNTIME DESTINATION lib64/audio-to-text)
 endif()
 
-# A desktop entry and a shell script mean nothing on Windows. Their equivalents
-# -- a Start Menu shortcut and a PowerShell model downloader -- belong with the
-# installer work, not here.
-if(NOT WIN32)
+# A desktop entry means nothing on Windows, where the Start Menu shortcut comes
+# from the installer instead. The model downloader exists for both, in the
+# language each platform can run without installing anything first.
+if(WIN32)
+    install(FILES scripts/install-model.ps1
+        DESTINATION ${CMAKE_INSTALL_BINDIR})
+else()
     install(FILES packaging/audio-to-text.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+
+    # Named audio-to-text to match Icon= in the desktop entry. The sizes are
+    # separate files rather than one scaled image because a desktop environment
+    # picks the exact size it needs, and a 512 pixel glyph scaled to 16 loses
+    # the thin strokes.
+    install(DIRECTORY packaging/icons/hicolor
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
 
     install(PROGRAMS scripts/install-model.sh
         DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -278,9 +303,39 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_HOMEPAGE_URL "${PROJECT_HOMEPAGE_URL}")
 set(CPACK_PACKAGE_CONTACT "david@sokrab.com")
 if(WIN32)
-    # A ZIP is what this branch can honestly produce: unpack and run. The signed
-    # installer is separate work; see docs/BUILDING.md.
+    # The ZIP is unpack-and-run and always produced. NSIS is added only when
+    # makensis is actually present, so a machine without it still gets an
+    # archive rather than a failed cpack run.
     set(CPACK_GENERATOR "ZIP")
+    find_program(AUDIO_TO_TEXT_MAKENSIS makensis)
+    if(AUDIO_TO_TEXT_MAKENSIS)
+        list(APPEND CPACK_GENERATOR "NSIS")
+    else()
+        message(STATUS
+            "makensis was not found: cpack will produce the ZIP but no installer.")
+    endif()
+
+    # Named without the version, so an upgrade replaces the previous install
+    # instead of leaving two copies side by side.
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "Audio to Text")
+    # Start Menu shortcut: the executable without its extension, then the label.
+    # CPack looks for it under bin/, which is where it is installed.
+    set(CPACK_PACKAGE_EXECUTABLES "audio_to_text" "Audio to Text")
+    set(CPACK_NSIS_PACKAGE_NAME "Audio to Text")
+    set(CPACK_NSIS_DISPLAY_NAME "Audio to Text ${PROJECT_VERSION}")
+    set(CPACK_NSIS_URL_INFO_ABOUT "${PROJECT_HOMEPAGE_URL}")
+    set(CPACK_NSIS_HELP_LINK "${PROJECT_HOMEPAGE_URL}")
+    set(CPACK_NSIS_CONTACT "${CPACK_PACKAGE_CONTACT}")
+    # Nothing here belongs on PATH, and an upgrade should not stack on top of
+    # the files windeployqt left behind last time.
+    set(CPACK_NSIS_MODIFY_PATH OFF)
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/audio-to-text.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/audio-to-text.ico")
+    # What Add/Remove Programs shows beside the entry.
+    set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\audio_to_text.exe")
+    # Recordings and transcripts live in %LOCALAPPDATA% and are the user's, not
+    # the installer's. Uninstalling removes the program and leaves them alone.
 else()
     set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
     set(CPACK_GENERATOR "RPM;TGZ")
@@ -291,8 +346,11 @@ else()
     # deliberately not packaged, being hundreds of megabytes.
     set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtbase-gui")
     set(CPACK_RPM_PACKAGE_AUTOREQPROV "no")
+    # These directories belong to other packages; this one only adds files to
+    # them. hicolor-icon-theme owns the icon tree.
     set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
-        "/usr/lib64" "/usr/share/applications" "/usr/share/doc")
+        "/usr/lib64" "/usr/share/applications" "/usr/share/doc"
+        "/usr/share/icons" "/usr/share/icons/hicolor")
 endif()
 
 include(CPack)

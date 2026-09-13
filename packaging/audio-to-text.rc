@@ -1,0 +1,7 @@
+// Gives audio_to_text.exe its icon in Explorer, the taskbar and Alt-Tab.
+// Windows takes the numerically lowest icon resource as the application icon,
+// so this is the only one the file defines.
+//
+// The path is relative to this file, which is where the resource compiler
+// resolves it from.
+1 ICON "audio-to-text.ico"
