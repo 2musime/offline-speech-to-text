@@ -80,9 +80,17 @@ window suggests stalled work.
 
 ## Saved transcripts
 
-`Transcripts` in the top bar, or `Ctrl+H`, shows the library: a
-list of every transcript the application has written, newest first, each row
-showing when it was recorded and the opening words. **Back to Recording** returns.
+`Transcripts` in the top bar, or `Ctrl+H`, shows the library: a list of every
+transcript the application has written, newest first, each named for when it was
+made:
+
+```text
+transcription-20260913002054
+```
+
+That name and nothing else, matching how recordings are named on the Speeches
+screen. What a transcript says is one click away; repeating a fragment of it on
+every row is noise.
 
 It is a separate screen rather than a panel beside the recorder. Nothing on it
 can start a recording, because none of the recording controls are present: there
@@ -90,7 +98,7 @@ is no model selector, no limit, no record button and no progress bar. A control
 that cannot be reached needs no rule about when it may be used.
 
 Selecting a row reads that transcript into the pane on the right, headed with
-when it was recorded, or `(audio deleted)` when the recording it came from is
+the same name, and marked `(audio deleted)` when the recording it came from is
 gone. The reader has its own view, so nothing about browsing disturbs a live
 transcription.
 
