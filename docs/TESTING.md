@@ -97,6 +97,10 @@ order, which catches loss and corruption but is weaker than a race detector.
 
 ## Not covered
 
+- The command-line suite does not run on Windows. `cli_tests.sh` is a shell
+  script, so CMake registers the `cli` test only on Unix; the unit and
+  interface suites run on both. Nothing silently passes: the test is absent
+  rather than skipped, and `ctest` reports two tests instead of three.
 - No test drives real widgets. The state table and text merging are tested as
   pure functions; clicking Start and observing the window is not automated.
 - Nothing exercises a real microphone, a device disconnect, or a permission
