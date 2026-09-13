@@ -1201,18 +1201,13 @@ private:
         }
 
         for (const TranscriptEntry& entry : entries_) {
-            char when[64];
+            // The name it was saved under, and nothing else. What it says is one
+            // click away; repeating a fragment of it on every row is noise.
+            char stamp[32];
             std::tm shown = entry.stamp.when;
-            std::strftime(when, sizeof(when), "%d %b %Y, %H:%M", &shown);
-            QString preview = entry.preview.empty()
-                ? QString("(no text)")
-                : QString::fromStdString(entry.preview);
-            // The row is a label, not the transcript: keep it to one glance.
-            if (preview.size() > 44) {
-                preview = preview.left(44).trimmed() + "...";
-            }
+            std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
             auto* item = new QListWidgetItem(
-                QString("%1\n%2").arg(QString::fromUtf8(when), preview), history_list_);
+                QString("transcription-%1").arg(QString::fromUtf8(stamp)), history_list_);
             item->setToolTip(QString::fromStdString(entry.path.string()));
         }
         if (previous_row >= 0 && previous_row < history_list_->count()) {
@@ -1243,16 +1238,19 @@ private:
             return;
         }
 
-        saved_view_->setPlainText(QString::fromStdString(text));
+        // Transcripts written before the text was trimmed at the source still
+        // carry Whisper's leading space; the file is left alone, the display is
+        // not.
+        saved_view_->setPlainText(QString::fromStdString(text).trimmed());
         saved_view_->moveCursor(QTextCursor::Start);
 
-        char when[64];
+        char stamp[32];
         std::tm shown = entry.stamp.when;
-        std::strftime(when, sizeof(when), "%d %b %Y at %H:%M", &shown);
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
         const CompanionAudio audio =
             companion_audio(entry.stamp, fs::path(data_directory_.toStdString()));
-        saved_title_->setText(QString("%1%2")
-            .arg(QString::fromUtf8(when), audio.any() ? "" : "   (audio deleted)"));
+        saved_title_->setText(QString("transcription-%1%2")
+            .arg(QString::fromUtf8(stamp), audio.any() ? "" : "   (audio deleted)"));
         saved_save_->setEnabled(true);
         saved_copy_->setEnabled(true);
         delete_saved_->setEnabled(true);

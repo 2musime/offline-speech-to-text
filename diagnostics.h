@@ -31,6 +31,18 @@ inline void report_error(ErrorCategory category, const std::string& message) {
     std::cerr << "ERROR|" << error_category_name(category) << '|' << message << std::endl;
 }
 
+// Whisper prefixes every segment with a space, so a joined transcript begins
+// with one. Trimmed once, at the point the text is finished, rather than in each
+// of the places that go on to save, print or display it.
+inline std::string trimmed(const std::string& text) {
+    const std::size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return {};
+    }
+    const std::size_t end = text.find_last_not_of(" \t\r\n");
+    return text.substr(begin, end - begin + 1);
+}
+
 // Advisories that do not stop processing.
 inline void report_warning(ErrorCategory category, const std::string& message) {
     std::cerr << "WARN|" << error_category_name(category) << '|' << message << std::endl;
