@@ -71,6 +71,34 @@ without it every normal stop would look like a failure. A lost device is
 reported as `ERROR|MICROPHONE|` and the recording is discarded rather than
 transcribed, because its tail is not trustworthy.
 
+## Silent and clipping input
+
+A recording is checked before anything is transcribed.
+
+**Every sample exactly zero** means no signal reached the application at all: a
+working but quiet microphone still has a noise floor. This is almost always a
+muted input, and it is reported as such rather than as "no speech detected",
+which sends people looking for a better microphone when the one they have is
+switched off:
+
+```text
+ERROR|MICROPHONE|No signal at all from "Built-in Audio Analog Stereo": every
+sample was silence. The input is almost certainly muted. Unmute it in your
+sound settings, or run: pactl set-source-mute @DEFAULT_SOURCE@ 0
+```
+
+**A peak below 32 of 32767** is reported as extremely quiet.
+
+**More than 1% of samples at full scale** is reported as clipping. The loud
+failure is as damaging to transcription as the quiet one and just as invisible,
+since a clipped recording looks like a strong signal:
+
+```text
+WARN|MICROPHONE|Audio from "Built-in Audio Analog Stereo" is clipping: 65% of
+samples are at full scale. Lower the input volume, or run:
+pactl set-source-volume @DEFAULT_SOURCE@ 60%
+```
+
 ## Permission and device failures
 
 Every `ma_result` is translated before it reaches the user:
@@ -95,6 +123,22 @@ List the capture devices:
 DEVICE|0||Monitor of Built-in Audio Analog Stereo
 DEVICE|1|default|Built-in Audio Analog Stereo
 ```
+
+```text
+DEVICE|0|default|Built-in Audio Analog Stereo|microphone
+DEVICE|1||Monitor of Built-in Audio Analog Stereo|monitor
+```
+
+The last field separates a real input from a **monitor**, which records what is
+played out of the speakers rather than what is said. Selecting one produces a
+recording of silence on a quiet machine, which is indistinguishable from a
+broken microphone. Real inputs are listed first, the system default first of
+all, and monitors last; choosing one is reported as a warning. Detection is by
+name, because miniaudio does not distinguish them.
+
+An index that no longer exists no longer refuses to record. Devices are plugged
+in and unplugged while the application runs, so a stale index falls back to the
+system default and says so.
 
 Select one by index, or omit `--device` for the system default:
 
