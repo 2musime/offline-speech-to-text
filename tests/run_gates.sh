@@ -9,13 +9,18 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
+. "$ROOT/tests/platform.sh"
 
 QUICK=0
 [ "${1:-}" = "--quick" ] && QUICK=1
 
 failed=""
+skipped=""
 step() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 record() { [ "$1" = "0" ] || failed="$failed\n  - $2"; }
+# A gate that cannot run on this platform is named at the end. It never counts
+# as a pass: the summary tells you exactly how much of the suite actually ran.
+omit() { skipped="$skipped\n  - $1: $2"; printf '(skipped: %s)\n' "$2"; }
 
 step "Repository and privacy guarantees"
 ./tests/check_guarantees.sh
@@ -30,26 +35,34 @@ cmake -S . -B build-release \
     -DCMAKE_BUILD_TYPE=Release \
     -DAUDIO_TO_TEXT_ENABLE_WARNINGS=ON \
     -DAUDIO_TO_TEXT_WARNINGS_AS_ERRORS=ON > /dev/null
-cmake --build build-release --parallel "$(nproc)" 2>&1 \
-    | grep -E "warning:|error:" | grep -v third_party | head -20
+cmake --build build-release $BUILD_CONFIG --parallel "$(cpu_count)" 2>&1 \
+    | grep -E "warning:|error:|warning C[0-9]|error C[0-9]" | grep -v third_party | head -20
 build_status=${PIPESTATUS[0]}
 record "$build_status" "build with -Werror"
 [ "$build_status" = "0" ] && echo "  no warnings from this project's targets"
 
 step "Tests"
-QT_QPA_PLATFORM=offscreen ctest --test-dir build-release --output-on-failure
+QT_QPA_PLATFORM=offscreen ctest --test-dir build-release $TEST_CONFIG --output-on-failure
 record $? "ctest"
+[ "$PLATFORM" = "linux" ] || omit "command-line suite" "cli_tests.sh is not registered on $PLATFORM"
 
 step "Binaries cannot reach the network"
 ./tests/check_guarantees.sh "$ROOT/build-release"
 record $? "no-network check against built binaries"
 
-if [ "$QUICK" = "0" ]; then
+if [ "$QUICK" = "0" ] && [ "$PLATFORM" != "linux" ]; then
+    # MSVC has an AddressSanitizer but no UndefinedBehaviorSanitizer, and the
+    # flags this project passes are GNU and Clang spellings. Building here would
+    # silently produce an uninstrumented binary and report a pass for a gate
+    # that never ran.
+    step "Sanitizers"
+    omit "sanitizers" "not available on $PLATFORM"
+elif [ "$QUICK" = "0" ]; then
     step "Sanitizers"
     cmake -S . -B build-sanitize \
         -DCMAKE_BUILD_TYPE=Debug \
         -DAUDIO_TO_TEXT_ENABLE_SANITIZERS=ON > /dev/null
-    cmake --build build-sanitize --parallel "$(nproc)" \
+    cmake --build build-sanitize --parallel "$(cpu_count)" \
         --target audio_to_text_unit_tests audio_to_text_gui_tests > /dev/null 2>&1
     ASAN_OPTIONS=detect_leaks=1 ./build-sanitize/audio_to_text_unit_tests | tail -1
     record ${PIPESTATUS[0]} "unit tests under sanitizers"
@@ -62,9 +75,15 @@ else
 fi
 
 printf '\n'
-if [ -z "$failed" ]; then
-    printf '\033[1mAll gates passed.\033[0m\n'
+if [ -n "$failed" ]; then
+    printf '\033[1mFAILED:\033[0m%b\n' "$failed"
+    [ -n "$skipped" ] && printf '\033[1mNot run here:\033[0m%b\n' "$skipped"
+    exit 1
+fi
+if [ -n "$skipped" ]; then
+    printf '\033[1mAll gates that run on %s passed.\033[0m\n' "$PLATFORM"
+    printf '\033[1mNot run here:\033[0m%b\n' "$skipped"
     exit 0
 fi
-printf '\033[1mFAILED:\033[0m%b\n' "$failed"
-exit 1
+printf '\033[1mAll gates passed.\033[0m\n'
+exit 0
