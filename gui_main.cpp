@@ -1238,7 +1238,10 @@ private:
             return;
         }
 
-        saved_view_->setPlainText(QString::fromStdString(text));
+        // Transcripts written before the text was trimmed at the source still
+        // carry Whisper's leading space; the file is left alone, the display is
+        // not.
+        saved_view_->setPlainText(QString::fromStdString(text).trimmed());
         saved_view_->moveCursor(QTextCursor::Start);
 
         char stamp[32];
