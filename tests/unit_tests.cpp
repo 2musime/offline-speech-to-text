@@ -499,6 +499,138 @@ void test_file_write_failures() {
     CHECK("session stamps have the expected shape", session_stamp().size() == 20);
 }
 
+// ------------------------------------------------------- platform behaviour
+
+// These pin down the three storage behaviours that differ between Linux and
+// Windows. They pass on either platform; what they defend against is a port
+// that quietly drops one of them.
+void test_storage_portability() {
+    harness::begin("Storage portability");
+
+    const fs::path directory = scratch_directory() / "portable";
+    std::error_code error;
+    fs::create_directories(directory, error);
+
+    // Committing over an existing file must replace it. POSIX rename does this
+    // by definition; the Windows call it maps to fails unless replacement is
+    // asked for explicitly, so the guarantee is worth stating.
+    const fs::path target = directory / "replaced.bin";
+    {
+        AtomicFile first(target);
+        CHECK("the first write opens", first.open());
+        CHECK("the first write accepts data", first.write("old", 3));
+        CHECK("the first write commits", first.commit());
+    }
+    CHECK_EQ("the first write is on disk", fs::file_size(target), std::uintmax_t{3});
+    {
+        AtomicFile second(target);
+        CHECK("the second write opens", second.open());
+        CHECK("the second write accepts data", second.write("newer", 5));
+        CHECK("committing over an existing file succeeds", second.commit());
+    }
+    CHECK_EQ("the existing file was replaced", fs::file_size(target), std::uintmax_t{5});
+
+    // The temporary has to be a sibling of the target: the rename is only
+    // atomic within one volume, and the destructor cleans up by that path.
+    const fs::path unicode_target = directory / "reunión-café.wav";
+    const fs::path companion = temporary_companion(unicode_target);
+    CHECK("the temporary sits beside its target",
+          companion.parent_path() == unicode_target.parent_path());
+    CHECK("the temporary keeps the target's name",
+          companion.filename().native().rfind(unicode_target.filename().native(), 0) == 0);
+    CHECK("the temporary is not the target itself", companion != unicode_target);
+
+    // A non-ASCII name must survive the round trip. On Windows this is where a
+    // narrow conversion would lose characters and strand the temporary.
+    {
+        AtomicFile unicode_file(unicode_target);
+        CHECK("a non-ASCII target opens", unicode_file.open());
+        CHECK("a non-ASCII target accepts data", unicode_file.write("data", 4));
+        CHECK("a non-ASCII target commits", unicode_file.commit());
+    }
+    CHECK("the non-ASCII target exists", fs::exists(unicode_target));
+    bool stray = false;
+    for (const fs::directory_entry& entry : fs::directory_iterator(directory, error)) {
+        if (entry.path().native().find(fs::path(".tmp-").native()) != fs::path::string_type::npos) {
+            stray = true;
+        }
+    }
+    CHECK_FALSE("a non-ASCII commit leaves no temporary", stray);
+
+    // Component comparison: identical components match everywhere. Differing
+    // ones match only where the filesystem itself ignores case.
+    CHECK("an identical component matches",
+          path_components_match(fs::path("Recordings"), fs::path("Recordings")));
+    CHECK_FALSE("a different component does not match",
+                path_components_match(fs::path("Recordings"), fs::path("Transcripts")));
+#if defined(_WIN32)
+    CHECK("case is ignored where the filesystem ignores it",
+          path_components_match(fs::path("Recordings"), fs::path("recordings")));
+#else
+    CHECK_FALSE("case is significant where the filesystem respects it",
+                path_components_match(fs::path("Recordings"), fs::path("recordings")));
+#endif
+
+    // The data directory is per user and named for the application, whichever
+    // environment variable supplied it.
+    const fs::path data = application_data_directory();
+    CHECK("the data directory is absolute", data.is_absolute());
+    CHECK("the data directory is named for the application",
+          data.filename().string().find("audio-to-text") != std::string::npos);
+
+    // A model shipped beside the application is found through this, so it has
+    // to be an absolute directory that really holds the running binary. On a
+    // platform with no way to ask, it is empty rather than wrong.
+    const fs::path beside = executable_directory();
+#if defined(_WIN32) || defined(__linux__)
+    CHECK("the executable directory is known", !beside.empty());
+    CHECK("the executable directory is absolute", beside.is_absolute());
+    CHECK("the executable directory exists", fs::is_directory(beside));
+    // This test binary is in it, which is the property the model root relies on.
+    bool holds_a_binary = false;
+    for (const fs::directory_entry& entry : fs::directory_iterator(beside, error)) {
+        if (entry.path().filename().string().find("audio_to_text") != std::string::npos) {
+            holds_a_binary = true;
+        }
+    }
+    CHECK("the executable directory holds this binary", holds_a_binary);
+
+    // A model beside the application resolves; one outside every root does not.
+    const fs::path models = beside / "models";
+    fs::create_directories(models, error);
+    const fs::path bundled = models / "ggml-bundled.bin";
+    { std::ofstream file(bundled, std::ios::binary); file << "not a real model"; }
+    const std::vector<fs::path> roots{beside / "models"};
+    fs::path approved;
+    std::string reason;
+    CHECK("a model beside the application is approved",
+          resolve_model_path(bundled.string(), roots, approved, reason));
+
+    // A bare name is searched for in the roots. This is what the interface
+    // sends, because a menu entry gives the process no useful working
+    // directory to resolve a relative path against.
+    CHECK("a bare model name is found in a root",
+          resolve_model_path("ggml-bundled.bin", roots, approved, reason));
+    CHECK("the bare name resolves to the file in that root",
+          approved == fs::canonical(bundled, error));
+    CHECK_FALSE("a bare name that is nowhere is refused",
+                resolve_model_path("ggml-absent.bin", roots, approved, reason));
+    CHECK("the refusal names where it looked",
+          reason.find("Looked in") != std::string::npos);
+    // A relative path is not a bare name, so the search does not apply to it
+    // and traversal cannot reach outside a root through this door.
+    CHECK_FALSE("a traversal is not treated as a bare name",
+                resolve_model_path("../ggml-bundled.bin", roots, approved, reason));
+    const fs::path outsider = scratch_directory() / "outside.bin";
+    { std::ofstream file(outsider, std::ios::binary); file << "not a real model"; }
+    CHECK_FALSE("a model outside every root is refused",
+                resolve_model_path(outsider.string(), roots, approved, reason));
+    fs::remove(bundled, error);
+#else
+    CHECK("an unknown executable directory is empty, not wrong", beside.empty());
+#endif
+}
+
 // Whisper prefixes every segment with a space, so a joined transcript would
 // otherwise begin with one, and every saved file would start indented.
 void test_text_trimming() {
@@ -756,6 +888,7 @@ int main() {
     test_ring_buffer_overflow();
     test_drain_past_the_limit();
     test_file_write_failures();
+    test_storage_portability();
     test_text_trimming();
     test_stamp_parsing();
     test_listing_transcripts();

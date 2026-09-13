@@ -78,6 +78,19 @@ Download with the vendored script, which fetches from that repository:
 bash third_party/whisper.cpp/models/download-ggml-model.sh small.en models
 ```
 
+## Naming a model
+
+Either by path, or by bare file name:
+
+```bash
+audio_to_text_cli ggml-base.en.bin              # searched for in the roots
+audio_to_text_cli models/ggml-base.en.bin       # resolved as a path
+audio_to_text_cli /opt/m.bin --model-dir /opt   # approved explicitly
+```
+
+The interface uses the first form. See
+[FILE_STORAGE.md](FILE_STORAGE.md) for the directories searched.
+
 ## Checksums
 
 **Upstream publishes no checksum list.** Do not treat any hash in this document
@@ -98,6 +111,14 @@ c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d  ggml-small.en.
 
 These are an observation, not a published reference. Verify against a fresh
 download over HTTPS from the source above if provenance matters to you.
+
+The `base.en` hash is also pinned in `CMakeLists.txt` as
+`AUDIO_TO_TEXT_BUNDLED_MODEL_SHA256`, and the Windows package build downloads
+the model and checks it against that value. The weakness of an unpublished
+checksum is its strength here: if the file behind that URL ever changes, the
+package build stops rather than quietly shipping different weights. Should the
+change turn out to be legitimate, verify the new file and update both places
+together.
 
 ## Checks
 

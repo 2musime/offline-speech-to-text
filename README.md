@@ -3,10 +3,13 @@
 Speech to text that runs entirely on your own computer. Nothing is uploaded, and
 the program opens no network connection.
 
-Linux, x86-64. Qt 6 interface, [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-for transcription, CPU only.
+Linux and Windows, x86-64. Qt 6 interface,
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp) for transcription,
+CPU only.
 
 ## Install
+
+Fedora:
 
 ```bash
 sudo dnf install ./audio-to-text-*-Linux.rpm
@@ -14,7 +17,10 @@ audio-to-text-install-model base.en --user
 audio_to_text
 ```
 
-Models are not packaged; the command above is the only step that uses the
+Windows: run the installer and open **Audio to Text** from the Start Menu. The
+`base.en` model is included, so there is nothing further to download.
+
+On Fedora the model is a separate step, and it is the only step that uses the
 network. See [INSTALL.md](INSTALL.md).
 
 ## Build
@@ -30,11 +36,12 @@ bash scripts/install-model.sh base.en --dir models
 
 ## Use
 
-Three screens: **Home**, **Recording**, **Transcripts**.
+Four screens: **Home**, **Recording**, **Transcripts**, **Speeches**.
 
 Choose a model, microphone and time limit, record, and the transcript appears.
 Partial text arrives while you speak; the full transcript is written when you
-stop. Past transcripts are readable and deletable under **Transcripts**.
+stop. Past transcripts are readable and deletable under **Transcripts**, and
+recordings can be played back under **Speeches**.
 
 There is also a command-line worker:
 
@@ -52,8 +59,12 @@ There is also a command-line worker:
 ~/.local/share/audio-to-text/transcripts/   transcription text
 ```
 
-Directories are created `0700` and files `0600`, readable only by you. Nothing
-is written to a log file.
+On Windows, the same two directories under
+`%LOCALAPPDATA%\audio-to-text\`.
+
+Readable only by you: on Linux through explicit permissions (`0700` and
+`0600`), on Windows through the per-user ACL that `%LOCALAPPDATA%` carries.
+Nothing is written to a log file.
 
 ## Privacy
 
@@ -95,7 +106,11 @@ tests/run_gates.sh --quick  # skip the sanitizer build
 
 ## Limitations
 
-- Fedora and x86-64 only; no `.deb`, no Flatpak, no GPU backend
+- x86-64 and CPU only; no GPU backend
+- Packaged for Fedora (`.rpm`) and Windows (installer and ZIP); no `.deb`, no
+  Flatpak
+- Windows builds and packages from the same source, but has not yet been run on
+  a Windows machine. The sanitizers and the command-line suite do not run there,
+  and the installer is unsigned, so SmartScreen will warn on first run
 - English models (`base.en`, `small.en`); multilingual models load but are untested
-- No audio playback; transcripts are text only
 - No automated test drives the interface

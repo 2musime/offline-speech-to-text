@@ -27,6 +27,14 @@ sudo dnf install gcc-c++ cmake make qt6-qtbase-devel
 
 The Whisper source and miniaudio header are kept in `third_party/`.
 
+## Dependencies on Windows
+
+- Visual Studio 2022 with the **Desktop development with C++** workload, or the
+  standalone Build Tools. The compiler is MSVC; MinGW is not tested here.
+- CMake 3.16 or newer, and Git with submodule support.
+- Qt 6 for MSVC, from the official Qt installer. Note the path you install it
+  to; CMake needs it.
+
 ## Production build
 
 From the project root, use a fresh build directory:
@@ -68,6 +76,67 @@ The limit is enforced for both normal and streaming capture. Empty recordings,
 unsupported duration values, buffer overflow, and truncated recordings produce
 clear errors instead of unbounded memory growth.
 
+## Windows build
+
+Configure from a Developer Command Prompt, pointing CMake at Qt:
+
+```bat
+cmake -S . -B build ^
+  -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64"
+cmake --build build --config Release --parallel
+```
+
+Everything lands in one directory, because Windows resolves a DLL from the
+folder holding the executable and there is no RPATH to send it elsewhere:
+
+```text
+build\bin\Release\audio_to_text.exe       Qt interface
+build\bin\Release\audio_to_text_cli.exe   console worker
+build\bin\Release\whisper.dll             and the ggml libraries
+```
+
+Qt's own libraries are not there yet, so the interface will not start from the
+build tree until either Qt's `bin` is on `PATH` or `windeployqt` has been run
+against it. Installing does that for you:
+
+```bat
+cmake --install build --config Release --prefix C:\opt\audio-to-text
+```
+
+The install step invokes `windeployqt` on the installed executable, which
+copies the Qt libraries and the platform plugin beside it. If `windeployqt`
+cannot be found, CMake says so at configure time and the installed application
+will not start.
+
+To produce the release artifacts, with the model inside them:
+
+```bat
+cmake -S . -B build -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64" ^
+  -DAUDIO_TO_TEXT_BUNDLE_MODEL=ON
+cmake --build build --config Release --parallel
+cpack -C Release
+```
+
+`AUDIO_TO_TEXT_BUNDLE_MODEL` downloads `base.en` once per build tree, about
+142 MB, and checks it against the hash pinned in `CMakeLists.txt`. It lands in
+`models` beside the executables, which the worker accepts as a model directory.
+Leave the option off for ordinary development builds; nobody compiling a change
+should have to wait for a download.
+
+`cpack` produces the NSIS installer when `makensis` is on PATH, and the ZIP
+either way. The installer adds a Start Menu entry and carries the application
+icon; `scripts/install-model.ps1` is installed beside the executables.
+
+### What is not there yet
+
+- **Unsigned binaries.** SmartScreen will warn on anything downloaded from the
+  internet until the installer is code-signed.
+- **The command-line test suite does not run**, and neither do the sanitizers.
+  See [TESTING.md](TESTING.md) and [QUALITY_GATES.md](QUALITY_GATES.md).
+- **Nothing here has been run on Windows.** It configures, installs and
+  packages from the same source as the Linux build, and that is all that is
+  known.
+
 ## Checks before pushing
 
 Everything is checked locally; there is no hosted pipeline to wait on:
@@ -107,6 +176,16 @@ Project targets use:
 ```text
 -Wall -Wextra -Wpedantic
 ```
+
+On MSVC the equivalent is:
+
+```text
+/W4 /permissive- /utf-8
+```
+
+`/permissive-` matters most: it rejects the Microsoft extensions that let
+non-portable code compile quietly, which is the failure mode this project
+cares about.
 
 Warnings from third-party Whisper code may still appear because that dependency
 is built as part of the project. They are not changed by this project baseline.

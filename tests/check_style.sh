@@ -12,8 +12,9 @@ failures=0
 pass() { checks=$((checks + 1)); echo "  ok   $1"; }
 fail() { checks=$((checks + 1)); failures=$((failures + 1)); echo "  FAIL $1"; [ $# -gt 1 ] && echo "$2"; }
 
-FILES="main.cpp gui_main.cpp partial_text.h ui_state.h diagnostics.h audio_ring_buffer.h
-       file_storage.h model_info.h speech_detection.h wav_io.h
+FILES="main.cpp gui_main.cpp miniaudio_impl.cpp partial_text.h ui_state.h diagnostics.h
+       audio_ring_buffer.h file_storage.h model_info.h speech_detection.h wav_io.h
+       audio_player.h transcript_library.h
        tests/unit_tests.cpp tests/gui_tests.cpp tests/test_harness.h"
 
 found="$(grep -lP '\t' $FILES 2>/dev/null)"
@@ -24,6 +25,9 @@ found="$(grep -nE '[[:space:]]+$' $FILES 2>/dev/null | head -5)"
 [ -z "$found" ] && pass "no trailing whitespace" \
                 || fail "no trailing whitespace" "$(echo "$found" | sed 's/^/       /')"
 
+# .gitattributes pins these files to LF in the working tree. Without it a clone
+# on Windows with core.autocrlf set checks every one of them out with CRLF and
+# this fails on files nobody touched.
 found="$(grep -lP '\r$' $FILES 2>/dev/null)"
 [ -z "$found" ] && pass "line endings are LF" \
                 || fail "line endings are LF" "$(echo "$found" | sed 's/^/       /')"

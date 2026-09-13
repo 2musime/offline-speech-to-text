@@ -9,6 +9,69 @@ tests/run_gates.sh --quick  # skip the sanitizer build
 
 It exits non-zero and names what failed.
 
+## Running them on Windows
+
+Under **Git Bash**, which ships with Git for Windows and is therefore already on
+any machine that can clone this repository with its submodule:
+
+```bash
+tests/run_gates.sh --quick
+```
+
+A PowerShell port was considered and rejected. It would mean two
+implementations of every gate, and the two would diverge the first time one was
+edited in a hurry -- the same reason the Windows support lives in `main` rather
+than on a branch of its own. One set of scripts, with the platform differences
+named inside them, is the smaller thing to keep correct.
+
+Run from a **Developer Command Prompt** started with Git Bash, or the binary
+checks cannot find `dumpbin` and report themselves as skipped.
+
+`tests/platform.sh` holds everything the scripts need to know about the machine:
+the executable suffix, the processor count, whether the generator picks its
+configuration at build time, and where the binaries landed. Setting
+`AUDIO_TO_TEXT_PLATFORM` pins the answer, which is how the Windows branches get
+exercised from a Linux machine.
+
+### What does not run there, and why
+
+| Gate | Windows | Why |
+|---|---|---|
+| Nothing private is tracked | runs | `git ls-files`, nothing platform-specific |
+| No networking in source | runs | text search |
+| Binaries import no networking | runs, differently | `dumpbin -imports` reads the PE import table; `nm` and `ldd` read ELF |
+| Transcription with no network | **skipped** | Windows has no network namespace |
+| Formatting | runs | see `.gitattributes` below |
+| Warnings as errors | runs | `/W4 /permissive- /WX` |
+| Unit and interface tests | run | |
+| Command-line suite | **skipped** | `cli_tests.sh` is not registered by CMake on Windows |
+| Sanitizers | **skipped** | MSVC has AddressSanitizer but no UndefinedBehaviorSanitizer |
+
+A skipped check is counted and named. The summary reads
+
+```text
+8 check(s), 0 failure(s), 3 skipped
+```
+
+and `run_gates.sh` finishes with `All gates that run on windows passed` followed
+by the list of what did not, never a bare `All gates passed`. This is the whole
+point of the exercise: a gate that quietly does nothing is worse than one that
+is absent, because it reads as coverage. The Windows run is a weaker guarantee
+than the Linux run, and it says so.
+
+The binary check is not merely ported but arguably stronger on Windows. Every
+socket call in every wrapper reaches `ws2_32.dll`, and the import table cannot
+be satisfied without it, so naming the library catches more than naming a
+symbol would.
+
+### Line endings
+
+`.gitattributes` pins the working tree to LF on every platform. Without it, a
+clone on Windows with `core.autocrlf` set checks every source file out with
+CRLF, the formatting gate fails on files nobody touched, and the first commit
+from that machine rewrites whole files. Batch and PowerShell scripts are the
+exception and are checked out with CRLF.
+
 ## Why these do not run on a hosted service
 
 GitHub Actions is not available on this repository's plan. A workflow was
@@ -24,6 +87,7 @@ doing the work.
 
 | Gate | Script | Checks |
 |---|---|---|
+| Platform facts | `tests/platform.sh` | sourced by the others; not a gate itself |
 | Guarantees | `tests/check_guarantees.sh` | nothing private committed; no networking in source or binaries |
 | Formatting | `tests/check_style.sh` | tabs, trailing whitespace, line endings, final newline, 120 columns |
 | Warnings | build with `-DAUDIO_TO_TEXT_WARNINGS_AS_ERRORS=ON` | `-Wall -Wextra -Wpedantic -Werror` on this project's targets |

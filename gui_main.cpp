@@ -16,6 +16,7 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMenu>
@@ -36,6 +37,22 @@
 #include <QStatusBar>
 #include <QVBoxLayout>
 
+namespace {
+
+// The worker sits beside the interface, whatever directory the application was
+// installed into. The suffix is named rather than left to the platform: Windows
+// would append it when starting the process, but not when the path is used for
+// anything else, and one spelling everywhere is easier to reason about.
+QString worker_program() {
+#if defined(Q_OS_WIN)
+    return QCoreApplication::applicationDirPath() + "/audio_to_text_cli.exe";
+#else
+    return QCoreApplication::applicationDirPath() + "/audio_to_text_cli";
+#endif
+}
+
+}  // namespace
+
 class AudioToTextWindow final : public QMainWindow {
 public:
     AudioToTextWindow() {
@@ -54,8 +71,11 @@ public:
         model_selector_ = new QComboBox(central);
         // base.en first, so it is the default: it transcribes roughly 3.5x
         // faster than small.en, which matters most on long recordings.
-        model_selector_->addItem("Speed: base.en", "models/ggml-base.en.bin");
-        model_selector_->addItem("Accuracy: small.en", "models/ggml-small.en.bin");
+        // A name, not a path. The worker searches its approved directories for
+        // it, which is the only thing that works when the application is
+        // started from a menu entry and inherits no useful working directory.
+        model_selector_->addItem("Speed: base.en", "ggml-base.en.bin");
+        model_selector_->addItem("Accuracy: small.en", "ggml-small.en.bin");
         model_selector_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
 
         device_selector_ = new QComboBox(central);
@@ -536,7 +556,7 @@ private:
         limit_seconds_ = duration_selector_->currentData().toInt();
         // No waitForStarted: blocking here would freeze the window. The state
         // stays LoadingModel until the worker says it is ready.
-        process_->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", arguments);
+        process_->start(worker_program(), arguments);
         apply_state(UiState::LoadingModel);
         set_status("Loading model...");
     }
@@ -1394,7 +1414,7 @@ private:
             apply_state(state_);
             probe->deleteLater();
         });
-        probe->start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli", {"--list-devices"});
+        probe->start(worker_program(), {"--list-devices"});
     }
 
     // DEVICE|index|default|name|kind. The name may itself contain a separator,
@@ -1609,8 +1629,7 @@ private:
         }
 
         QProcess cleaner;
-        cleaner.start(QCoreApplication::applicationDirPath() + "/audio_to_text_cli",
-                      {"--delete-recordings"});
+        cleaner.start(worker_program(), {"--delete-recordings"});
         if (!cleaner.waitForFinished(10000)) {
             cleaner.kill();
             cleaner.waitForFinished(1000);
@@ -1776,6 +1795,12 @@ private:
 
 int main(int argc, char* argv[]) {
     QApplication application(argc, argv);
+    // Set on the application rather than the window, so message boxes and file
+    // dialogs carry it too. On Linux a desktop environment matches a running
+    // window to its desktop entry by this name, which is how the launcher and
+    // the taskbar end up showing the same icon.
+    application.setDesktopFileName("audio-to-text");
+    application.setWindowIcon(QIcon(":/icons/audio-to-text-512.png"));
     AudioToTextWindow window;
     window.show();
     return application.exec();

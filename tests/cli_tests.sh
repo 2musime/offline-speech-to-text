@@ -6,7 +6,10 @@ set -u
 # Resolve everything from this script's location so the suite does not depend on
 # the working directory. CTest runs it from the build tree.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${1:-$ROOT/build-release/audio_to_text_cli}"
+. "$ROOT/tests/platform.sh"
+# CTest passes the real path. The default is for running the suite by hand, and
+# has to find the binary wherever this platform's generator put it.
+BIN="${1:-$(binary_dir "$ROOT/build-release")/audio_to_text_cli$EXE}"
 MODEL="$ROOT/models/ggml-base.en.bin"
 cd "$ROOT" || exit 1
 if [ ! -f "$MODEL" ]; then

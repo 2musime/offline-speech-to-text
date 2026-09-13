@@ -1,7 +1,8 @@
 # Installing
 
-Offline speech to text for Linux. Audio is captured, analysed and transcribed on
-your own machine; nothing is uploaded. See [docs/PRIVACY.md](docs/PRIVACY.md).
+Offline speech to text for Linux and Windows. Audio is captured, analysed and
+transcribed on your own machine; nothing is uploaded. See
+[docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## From a package (Fedora)
 
@@ -35,6 +36,48 @@ audio_to_text          # the graphical interface
 
 The GUI also appears in the desktop menu under Sound &amp; Video.
 
+## From a package (Windows)
+
+Run `audio-to-text-<version>-win64.exe` and accept the default location. The
+installer places the program, the Whisper libraries, the Qt libraries **and the
+`base.en` speech model** in one directory, and adds **Audio to Text** to the
+Start Menu. There is nothing else to download and nothing to configure: open it
+from the Start Menu and record.
+
+That is the only difference from the Fedora package, where the model is fetched
+separately. Windows has no distribution to provide one, and a first run that
+ends in a PowerShell command is a poor way to meet an application.
+
+Windows will warn before it runs: the installer is not code-signed, so
+SmartScreen shows *"Windows protected your PC"*. Choose **More info**, then
+**Run anyway**. There is no way around this short of buying a code-signing
+certificate, and you should be suspicious of any download that asks you to
+bypass the warning -- verify the file came from this project's releases page.
+
+The ZIP is the same files, model included, with no installer and no Start Menu
+entry. Unpack it anywhere and run `bin\audio_to_text.exe`. Keep the `models`
+folder beside the executable; that is where it is found.
+
+To use a different model, `small.en` for better accuracy:
+
+```powershell
+& "$env:ProgramFiles\Audio to Text\bin\install-model.ps1" small.en
+```
+
+It downloads into `%LOCALAPPDATA%\audio-to-text\models` and prints the file's
+SHA-256. Then check the installation:
+
+```powershell
+& "$env:ProgramFiles\Audio to Text\bin\audio_to_text_cli.exe" --version
+& "$env:ProgramFiles\Audio to Text\bin\audio_to_text_cli.exe" --list-devices
+```
+
+If `--list-devices` shows nothing, or recording produces silence, check
+**Settings -> Privacy & security -> Microphone** and confirm that *"Let desktop
+apps access your microphone"* is on. Windows blocks the device without telling
+the application why, so this looks like a broken microphone rather than a
+permission.
+
 ## From source
 
 See [docs/BUILDING.md](docs/BUILDING.md). In short:
@@ -51,9 +94,13 @@ bash scripts/install-model.sh base.en --dir models
 
 ## Requirements
 
-x86-64 Linux, about 1 GB free memory for `base.en`, a microphone, and no network
-connection at all after the model is in place. Full detail in
+x86-64 Linux or Windows, about 1 GB free memory for `base.en`, a microphone, and
+no network connection at all after the model is in place. Full detail in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+Windows support is built and packaged from the same source as the Linux build,
+but has not yet been run on a Windows machine. Treat this release as untested
+there and report what breaks.
 
 ## Where your files go
 
@@ -63,7 +110,12 @@ connection at all after the model is in place. Full detail in
 ~/.local/share/audio-to-text/models/         models installed with --user
 ```
 
-Directories are created readable only by you. Delete everything stored with:
+On Windows the same three directories sit under
+`%LOCALAPPDATA%\audio-to-text\`.
+
+They are readable only by you: on Linux through explicit permissions, on
+Windows through the per-user ACL that `%LOCALAPPDATA%` already carries. Delete
+everything stored with:
 
 ```bash
 audio_to_text_cli --delete-recordings
@@ -73,10 +125,21 @@ or the **Delete recordings** button in the interface.
 
 ## Uninstalling
 
+Fedora:
+
 ```bash
 sudo dnf remove audio-to-text
 rm -rf ~/.local/share/audio-to-text
 ```
 
-The second command removes your recordings, transcripts and any model installed
-with `--user`. Nothing is left elsewhere.
+Windows: uninstall **Audio to Text** from *Settings -> Apps*, then remove your
+data if you want it gone:
+
+```powershell
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\audio-to-text"
+```
+
+On both systems the uninstaller removes only the program. The second command
+removes your recordings, transcripts and any model you installed -- which is
+why it is separate, and deliberately not something an uninstaller decides for
+you. Nothing is left elsewhere.
