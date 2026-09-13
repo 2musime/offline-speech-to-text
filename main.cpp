@@ -508,7 +508,7 @@ bool run_transcription(
         }
     }
 
-    result.text = transcription;
+    result.text = trimmed(transcription);
     result.milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - transcription_start).count();
     return true;
@@ -661,6 +661,38 @@ void streaming_worker(
               << "|cpu_ms=" << process_cpu_milliseconds() - cpu_start << std::endl;
 }
 
+// A monitor source records what is playing out of the speakers, not what is
+// said. Detection is by name because miniaudio does not distinguish them, which
+// is a heuristic: PulseAudio and PipeWire both use this wording.
+inline bool is_monitor_source(const char* name) {
+    std::string lowered(name);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowered.find("monitor") != std::string::npos;
+}
+
+// Real microphones first, the system default first of all, monitors last. Both
+// listing and selection use this order, so the index a user is shown is the
+// index that gets opened.
+std::vector<ma_uint32> ordered_devices(const ma_device_info* infos, ma_uint32 count) {
+    std::vector<ma_uint32> order(count);
+    for (ma_uint32 i = 0; i < count; ++i) {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [infos](ma_uint32 a, ma_uint32 b) {
+        const bool a_monitor = is_monitor_source(infos[a].name);
+        const bool b_monitor = is_monitor_source(infos[b].name);
+        if (a_monitor != b_monitor) {
+            return b_monitor;
+        }
+        if (infos[a].isDefault != infos[b].isDefault) {
+            return infos[a].isDefault != 0;
+        }
+        return a < b;
+    });
+    return order;
+}
+
 // Prints the capture devices in a form both a person and the GUI can read.
 bool list_capture_devices(AudioContext& context) {
     ma_device_info* infos = nullptr;
@@ -676,10 +708,15 @@ bool list_capture_devices(AudioContext& context) {
         return false;
     }
 
-    for (ma_uint32 i = 0; i < count; ++i) {
-        std::cout << "DEVICE|" << i << '|'
-                  << (infos[i].isDefault ? "default" : "") << '|'
-                  << infos[i].name << std::endl;
+    const std::vector<ma_uint32> order = ordered_devices(infos, count);
+    for (std::size_t position = 0; position < order.size(); ++position) {
+        const ma_device_info& info = infos[order[position]];
+        // The fourth field marks a monitor, so the interface can say so without
+        // having to recognise the wording itself.
+        std::cout << "DEVICE|" << position << '|'
+                  << (info.isDefault ? "default" : "") << '|'
+                  << info.name << '|'
+                  << (is_monitor_source(info.name) ? "monitor" : "microphone") << std::endl;
     }
     return true;
 }
@@ -706,15 +743,24 @@ bool select_capture_device(
         return false;
     }
     if (static_cast<ma_uint32>(requested_index) >= count) {
-        report_error(ErrorCategory::Microphone,
-            "Capture device " + std::to_string(requested_index) + " does not exist; " +
-            std::to_string(count) + " device(s) are available. Use --list-devices.");
-        return false;
+        // The device may simply have been unplugged since the list was made.
+        // Falling back to the system default beats refusing to record at all.
+        report_warning(ErrorCategory::Microphone,
+            "Capture device " + std::to_string(requested_index) + " is no longer available; " +
+            std::to_string(count) + " device(s) are present. Using the system default.");
+        return true;
     }
 
-    id = infos[requested_index].id;
+    const std::vector<ma_uint32> order = ordered_devices(infos, count);
+    const ma_device_info& info = infos[order[static_cast<std::size_t>(requested_index)]];
+    id = info.id;
     has_id = true;
-    name = infos[requested_index].name;
+    name = info.name;
+    if (is_monitor_source(info.name)) {
+        report_warning(ErrorCategory::Microphone,
+            "\"" + name + "\" is a monitor of the speaker output, not a microphone. "
+            "It records what is played, not what is said.");
+    }
     return true;
 }
 
@@ -1294,6 +1340,48 @@ int run(int argc, char** argv) {
         if (recorded_samples.empty()) {
             report_error(ErrorCategory::Recording, "No audio was captured. Check the microphone and try again.");
             continue;
+        }
+
+        // A working but quiet microphone still has a noise floor. Samples that
+        // are all exactly zero mean no signal reached us at all: the input is
+        // muted, or it is not a microphone. Saying "no speech detected" here
+        // sends people looking for a better microphone when the one they have
+        // is simply switched off.
+        std::int16_t peak = 0;
+        for (const std::int16_t sample : recorded_samples) {
+            peak = std::max<std::int16_t>(peak, static_cast<std::int16_t>(std::abs(sample)));
+        }
+        if (peak == 0) {
+            report_error(ErrorCategory::Microphone,
+                "No signal at all from \"" + active_name + "\": every sample was silence. "
+                "The input is almost certainly muted. Unmute it in your sound settings, or "
+                "run: pactl set-source-mute @DEFAULT_SOURCE@ 0");
+            continue;
+        }
+        constexpr std::int16_t barely_audible = 32;
+        if (peak < barely_audible) {
+            report_warning(ErrorCategory::Microphone,
+                "Audio from \"" + active_name + "\" is extremely quiet (peak " +
+                std::to_string(peak) + " of 32767). Check the input volume if nothing "
+                "is transcribed.");
+        }
+
+        // The opposite failure is just as damaging and just as invisible: a
+        // clipped signal transcribes badly, and nothing about it looks wrong.
+        constexpr std::int16_t clipping_level = 32000;
+        std::size_t clipped = 0;
+        for (const std::int16_t sample : recorded_samples) {
+            if (std::abs(sample) >= clipping_level) {
+                ++clipped;
+            }
+        }
+        const double clipped_share = static_cast<double>(clipped) / recorded_samples.size();
+        if (clipped_share > 0.01) {
+            report_warning(ErrorCategory::Microphone,
+                "Audio from \"" + active_name + "\" is clipping: " +
+                std::to_string(static_cast<int>(clipped_share * 100.0)) +
+                "% of samples are at full scale. Lower the input volume, or run: "
+                "pactl set-source-volume @DEFAULT_SOURCE@ 60%");
         }
 
         const std::size_t dropped = capture.dropped_frames.load(std::memory_order_acquire);

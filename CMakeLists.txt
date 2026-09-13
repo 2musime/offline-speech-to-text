@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(AudioToText
-    VERSION 1.0.1
+    VERSION 1.1.0
     DESCRIPTION "Offline speech to text"
     HOMEPAGE_URL "https://github.com/2musime/offline-speech-to-text"
     LANGUAGES CXX)
@@ -75,15 +75,20 @@ target_link_libraries(audio_to_text_cli PRIVATE
 
 add_executable(audio_to_text
     gui_main.cpp
+    miniaudio_impl.cpp
 )
 
 target_include_directories(audio_to_text PRIVATE
     .
+    third_party
     "${CMAKE_BINARY_DIR}/generated"
 )
 
 target_link_libraries(audio_to_text PRIVATE
     Qt6::Widgets
+    Threads::Threads
+    ${CMAKE_DL_LIBS}
+    m
 )
 
 # So an installed binary finds the private Whisper and ggml libraries.

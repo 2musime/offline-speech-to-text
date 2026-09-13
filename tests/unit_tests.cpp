@@ -1,6 +1,7 @@
 #include "test_harness.h"
 
 #include "audio_ring_buffer.h"
+#include "diagnostics.h"
 #include "file_storage.h"
 #include "model_info.h"
 #include "speech_detection.h"
@@ -498,6 +499,31 @@ void test_file_write_failures() {
     CHECK("session stamps have the expected shape", session_stamp().size() == 20);
 }
 
+// Whisper prefixes every segment with a space, so a joined transcript would
+// otherwise begin with one, and every saved file would start indented.
+void test_text_trimming() {
+    harness::begin("Transcript text trimming");
+
+    CHECK_TEXT("a leading space is removed", trimmed(" Okay, that is what I said."),
+               "Okay, that is what I said.");
+    CHECK_TEXT("trailing space is removed", trimmed("Hello there.  "), "Hello there.");
+    CHECK_TEXT("both ends at once", trimmed("  Hello there.  "), "Hello there.");
+    CHECK_TEXT("inner spacing is preserved", trimmed(" a  b   c "), "a  b   c");
+    CHECK_TEXT("text with nothing to trim is unchanged", trimmed("Hello."), "Hello.");
+    CHECK_TEXT("newlines and tabs count as space", trimmed("\n\t Hello. \t\n"), "Hello.");
+    CHECK_TEXT("all whitespace becomes empty", trimmed("   \n\t  "), "");
+    CHECK_TEXT("empty stays empty", trimmed(""), "");
+    CHECK_TEXT("a single character survives", trimmed(" a "), "a");
+    // The real case: several Whisper segments joined, each with its own space.
+    CHECK_TEXT("joined segments keep their inner spaces",
+               trimmed(" First part. second part. third part."),
+               "First part. second part. third part.");
+
+    // The line protocol must still not carry a newline once trimmed.
+    CHECK_TEXT("flattening after trimming is stable",
+               as_single_line(trimmed(" one\ntwo ")), "one two");
+}
+
 // ------------------------------------------------------------- transcripts
 
 // Writes a transcript with the given stamp, returning its path.
@@ -730,6 +756,7 @@ int main() {
     test_ring_buffer_overflow();
     test_drain_past_the_limit();
     test_file_write_failures();
+    test_text_trimming();
     test_stamp_parsing();
     test_listing_transcripts();
     test_preview_truncation();
