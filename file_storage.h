@@ -57,6 +57,27 @@ inline fs::path application_data_directory() {
 #endif
 }
 
+// The directory this executable was started from. argv[0] is not a substitute:
+// it is whatever the caller passed and need not be a path at all. Empty when
+// the platform cannot answer, so callers must check before using it.
+inline fs::path executable_directory() {
+#if defined(_WIN32)
+    // The C runtime's own record of the path the process started from. Wide,
+    // so a path the active code page cannot express survives intact.
+    wchar_t* program = nullptr;
+    if (::_get_wpgmptr(&program) == 0 && program != nullptr && program[0] != L'\0') {
+        return fs::path(program).parent_path();
+    }
+#elif defined(__linux__)
+    std::error_code error;
+    const fs::path self = fs::read_symlink("/proc/self/exe", error);
+    if (!error) {
+        return self.parent_path();
+    }
+#endif
+    return {};
+}
+
 // Creates the directory if needed and restricts it to the owner.
 inline bool ensure_private_directory(const fs::path& directory) {
     std::error_code error;

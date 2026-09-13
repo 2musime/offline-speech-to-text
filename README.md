@@ -17,13 +17,10 @@ audio-to-text-install-model base.en --user
 audio_to_text
 ```
 
-Windows: run the installer, then fetch a model and start it from the Start Menu:
+Windows: run the installer and open **Audio to Text** from the Start Menu. The
+`base.en` model is included, so there is nothing further to download.
 
-```powershell
-& "$env:ProgramFiles\Audio to Text\bin\install-model.ps1" base.en
-```
-
-Models are not packaged; the model download is the only step that uses the
+On Fedora the model is a separate step, and it is the only step that uses the
 network. See [INSTALL.md](INSTALL.md).
 
 ## Build

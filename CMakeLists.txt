@@ -44,6 +44,14 @@ option(AUDIO_TO_TEXT_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)
 # Applied only to this project's targets; vendored Whisper is not held to it.
 option(AUDIO_TO_TEXT_WARNINGS_AS_ERRORS "Treat this project's warnings as errors" OFF)
 
+# Puts base.en inside the package, so the application works the moment it is
+# installed. Off by default: it makes configuring the project download 142 MB,
+# which nobody building from source should be made to do without asking.
+option(AUDIO_TO_TEXT_BUNDLE_MODEL "Ship base.en inside the package" OFF)
+set(AUDIO_TO_TEXT_BUNDLED_MODEL_SHA256
+    "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+    CACHE STRING "Expected SHA-256 of the bundled model")
+
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
@@ -219,6 +227,43 @@ if(AUDIO_TO_TEXT_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
     target_link_options(audio_to_text_gui_tests PRIVATE ${AUDIO_TO_TEXT_SANITIZER_FLAGS})
 endif()
 
+# --------------------------------------------------------------- bundled model
+# The worker accepts a model from a "models" directory beside the executable, so
+# a package that includes one puts it there and nothing else has to change.
+if(AUDIO_TO_TEXT_BUNDLE_MODEL)
+    if(NOT WIN32)
+        message(FATAL_ERROR
+            "AUDIO_TO_TEXT_BUNDLE_MODEL is for the Windows packages. On Linux "
+            "the model is a separate download and would land in /usr/bin/models, "
+            "which is not a sane place for 142 MB of weights.")
+    endif()
+
+    set(AUDIO_TO_TEXT_BUNDLED_MODEL
+        "${CMAKE_BINARY_DIR}/bundled-model/ggml-base.en.bin")
+
+    # Kept out of git and downloaded once per build tree. The hash is the one
+    # recorded in docs/MODEL_VALIDATION.md, which is an observation rather than
+    # a published reference -- upstream publishes no checksum list. That is the
+    # point: if the file behind that URL ever changes, this build stops instead
+    # of quietly shipping different weights.
+    if(NOT EXISTS "${AUDIO_TO_TEXT_BUNDLED_MODEL}")
+        message(STATUS "Downloading base.en to bundle (about 142 MB)...")
+        file(DOWNLOAD
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+            "${AUDIO_TO_TEXT_BUNDLED_MODEL}"
+            EXPECTED_HASH "SHA256=${AUDIO_TO_TEXT_BUNDLED_MODEL_SHA256}"
+            SHOW_PROGRESS
+            STATUS AUDIO_TO_TEXT_MODEL_STATUS)
+        list(GET AUDIO_TO_TEXT_MODEL_STATUS 0 AUDIO_TO_TEXT_MODEL_CODE)
+        if(NOT AUDIO_TO_TEXT_MODEL_CODE EQUAL 0)
+            list(GET AUDIO_TO_TEXT_MODEL_STATUS 1 AUDIO_TO_TEXT_MODEL_MESSAGE)
+            file(REMOVE "${AUDIO_TO_TEXT_BUNDLED_MODEL}")
+            message(FATAL_ERROR
+                "Could not obtain the model: ${AUDIO_TO_TEXT_MODEL_MESSAGE}")
+        endif()
+    endif()
+endif()
+
 # ----------------------------------------------------------------- installation
 include(GNUInstallDirs)
 
@@ -243,6 +288,16 @@ endif()
 if(WIN32)
     install(FILES scripts/install-model.ps1
         DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+    if(AUDIO_TO_TEXT_BUNDLE_MODEL)
+        install(FILES "${AUDIO_TO_TEXT_BUNDLED_MODEL}"
+            DESTINATION ${CMAKE_INSTALL_BINDIR}/models)
+        # MIT permits redistributing the weights and requires the notice to
+        # travel with them.
+        install(FILES third_party/whisper.cpp/LICENSE
+            DESTINATION ${CMAKE_INSTALL_BINDIR}/models
+            RENAME LICENSE-whisper.cpp.txt)
+    endif()
 else()
     install(FILES packaging/audio-to-text.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
