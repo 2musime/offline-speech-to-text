@@ -8,7 +8,7 @@ can always identify itself:
 
 ```bash
 audio_to_text_cli --version
-# audio_to_text 1.0.0 (e077594, Release)
+# audio_to_text 1.1.0 (76c5605, Release)
 ```
 
 The GUI shows the same under **About**, and in its title bar.
@@ -41,6 +41,14 @@ clicks a button, so this step is the only thing standing between a broken
 interface and a release.
 
 **4. The version is bumped** in `CMakeLists.txt`, and `--version` reports it.
+Nothing else needs editing: the install commands in `README.md`, `INSTALL.md`
+and this file match any version on purpose. Confirm with:
+
+```bash
+grep -rn "audio-to-text-[0-9]" README.md INSTALL.md docs/ | grep -v '\*'
+```
+
+Anything it prints is a hard-coded version that will go stale.
 
 **5. A fresh clone builds**
 
@@ -74,8 +82,8 @@ Compare against [PERFORMANCE.md](PERFORMANCE.md). Run-to-run variance is about
 **9. Tag and publish**
 
 ```bash
-git tag -a v1.0.0 -m "1.0.0"
-git push origin v1.0.0
+git tag -a v1.1.0 -m "1.1.0"
+git push origin v1.1.0
 ```
 
 ## Building packages
@@ -141,7 +149,7 @@ Confirm before shipping:
 
 
 ```bash
-sudo dnf install ./audio-to-text-1.0.0-Linux.rpm
+sudo dnf install ./audio-to-text-*-Linux.rpm
 audio_to_text_cli --version
 audio-to-text-install-model base.en --user
 audio_to_text_cli --list-devices
