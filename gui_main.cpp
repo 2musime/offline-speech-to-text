@@ -331,6 +331,7 @@ public:
         QFont playing_font = now_playing_->font();
         playing_font.setBold(true);
         now_playing_->setFont(playing_font);
+        now_playing_->setAlignment(Qt::AlignCenter);
         player_layout->addWidget(now_playing_);
 
         auto* transport_panel = new QGroupBox(player_panel);
@@ -354,6 +355,7 @@ public:
         play_time_->setFont(time_font);
 
         auto* transport = new QHBoxLayout();
+        transport->addStretch();
         transport->addWidget(play_button_);
         transport->addWidget(stop_play_button_);
         transport->addSpacing(20);
@@ -372,6 +374,7 @@ public:
         recording_details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         recording_details_->setWordWrap(true);
         recording_details_->setEnabled(false);
+        recording_details_->setAlignment(Qt::AlignCenter);
         player_layout->addWidget(recording_details_);
         player_layout->addStretch();
 
@@ -985,7 +988,6 @@ private:
         if (recordings_.empty()) {
             auto* empty = new QListWidgetItem(
                 "No recordings yet\n\nGo to Recording to make one", speech_list_);
-            empty->setTextAlignment(Qt::AlignCenter);
             empty->setFlags(Qt::NoItemFlags);
             return;
         }
@@ -998,7 +1000,6 @@ private:
             std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
             auto* item = new QListWidgetItem(
                 QString("recording-%1").arg(QString::fromUtf8(stamp)), speech_list_);
-            item->setTextAlignment(Qt::AlignCenter);
             item->setToolTip(QString::fromStdString(entry.path.string()));
         }
         if (previous >= 0 && previous < speech_list_->count()) {
@@ -1013,9 +1014,7 @@ private:
             now_playing_->setText(recordings_.empty()
                 ? QString("Nothing recorded yet")
                 : QString("Select a recording to play it"));
-            recording_details_->setText(recordings_.empty()
-                ? QString("Recordings you make appear here, and can be played back.")
-                : QString());
+            recording_details_->setText(QString());
             play_button_->setEnabled(false);
             stop_play_button_->setEnabled(false);
             delete_speech_->setEnabled(false);
@@ -1042,10 +1041,7 @@ private:
         char stamp[32];
         std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &shown);
         now_playing_->setText(QString("recording-%1").arg(QString::fromUtf8(stamp)));
-        recording_details_->setText(QString(
-            "%1 long, %2 MB.  %3\n"
-            "This is the original recording. Whisper is given the speech "
-            "extracted from it, not this.")
+        recording_details_->setText(QString("%1 long, %2 MB.  %3")
             .arg(QTime(0, 0).addSecs(static_cast<int>(entry.seconds)).toString("mm:ss"),
                  QString::number(entry.size_bytes / (1024.0 * 1024.0), 'f', 1),
                  entry.has_transcript ? "Transcribed." : "Not transcribed."));

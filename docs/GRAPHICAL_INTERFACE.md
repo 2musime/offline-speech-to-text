@@ -139,10 +139,11 @@ it was made:
 recording-20260913145545
 ```
 
-That name and nothing else. Length, size and whether it was transcribed belong
-to the recording you have selected, not to every row, and are shown beneath the
-player once one is chosen. Selecting a row loads it; **Play**, **Stop** and the
-position slider work as they do anywhere else.
+That name and nothing else, left aligned as a list of files should be. Length,
+size and whether it was transcribed belong to the recording you have selected,
+not to every row, and appear beneath the player once one is chosen. The player
+itself is centred. Selecting a row loads it; **Play**, **Stop** and the position
+slider work as they do anywhere else.
 
 **What plays is the raw capture.** Each recording produces three files: the raw
 audio, a noise-reduced copy, and the speech extracted from it. Only the
